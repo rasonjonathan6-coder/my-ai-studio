@@ -100,16 +100,18 @@ start_postgres() {
 
 start_backend() {
   $DOCKER rm -f "$API_CONTAINER" >/dev/null 2>&1
-  # Pass OpenRouter credentials only when .env provides them. The value is read
-  # into a shell variable and handed to docker without being echoed, so it never
-  # reaches the terminal, this script's output, or any log.
+  # Pass AI provider credentials only when .env provides them. The values are
+  # read into shell variables and handed to docker without being echoed, so they
+  # never reach the terminal, this script's output, or any log.
   local or_args=()
   if [ -f "$ROOT/.env" ]; then
-    local or_key or_model
-    or_key="$(sed -n 's/^OPENROUTER_API_KEY=//p' "$ROOT/.env" | head -1)"
-    or_model="$(sed -n 's/^OPENROUTER_MODEL=//p' "$ROOT/.env" | head -1)"
-    [ -n "$or_key" ] && or_args+=(-e "OPENROUTER_API_KEY=$or_key")
-    [ -n "$or_model" ] && or_args+=(-e "OPENROUTER_MODEL=$or_model")
+    local key model
+    for prefix in OPENROUTER GEMINI GROQ; do
+      key="$(sed -n "s/^${prefix}_API_KEY=//p" "$ROOT/.env" | head -1)"
+      model="$(sed -n "s/^${prefix}_MODEL=//p" "$ROOT/.env" | head -1)"
+      [ -n "$key" ] && or_args+=(-e "${prefix}_API_KEY=$key")
+      [ -n "$model" ] && or_args+=(-e "${prefix}_MODEL=$model")
+    done
   fi
   $DOCKER run -d --name "$API_CONTAINER" -p 8080:8080 --link "$PG_CONTAINER":pg \
     --group-add "$(socket_gid)" \

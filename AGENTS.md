@@ -66,10 +66,33 @@ root-level install.
 
 ## Model integration
 
-`OPENROUTER_API_KEY`, `OPENROUTER_MODEL` and `OPENROUTER_BASE_URL` are read
-server-side only. The key must never reach the frontend bundle, an APK, a log, an
-exported ZIP or a response body. `OPENROUTER_BASE_URL` exists so a local stand-in
-can be used for testing without spending quota.
+Three providers are supported: OpenRouter (`OPENROUTER_*`), Google Gemini
+(`GEMINI_*`, reached through its OpenAI-compatible endpoint) and Groq
+(`GROQ_*`). Every key is read server-side only and must never reach the frontend
+bundle, an APK, a log, an exported ZIP or a response body. `*_BASE_URL` exists so
+a local stand-in can be used for testing without spending quota.
+
+`AI_DEFAULT_PROVIDER` (`auto` by default) and `AI_PROVIDER_ORDER`
+(`openrouter,gemini,groq`) decide which provider serves a run:
+
+- `auto` walks the order and fails over **only** on temporary conditions
+  (`rate_limited`, `quota_exhausted`, `timeout`, `network_error`, 5xx). A 400,
+  401 or 403 surfaces immediately: a bad key must stay visible instead of being
+  masked by a failover that would make every provider look broken.
+- A named provider pins the run to it; failure is reported, never silently
+  switched away from.
+- A provider that hit a hard quota or a throttle enters a cooldown
+  (`AI_PROVIDER_COOLDOWN_MS`, default 5 min) and is skipped by later AUTO runs.
+  `POST /api/ai/providers/:id/reset` clears it.
+- `POST /api/ai/providers/:id/test` performs a real completion and reports the
+  observed HTTP status; a provider is never labelled connected without a round
+  trip. `connection` stays `NOT_TESTED` until then.
+
+`ChatFailure.kind` has no `quota_exhausted` member: an exhausted quota stays
+`rate_limited` with `quotaExhausted: true` and `retryable: false`, so callers
+that switch on `kind` keep working and the reset instant travels as
+`retryAfterMs`. The agent loop only waits out a throttle that is actually
+retryable.
 
 Free-tier behaviour worth remembering:
 

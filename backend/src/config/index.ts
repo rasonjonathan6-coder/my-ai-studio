@@ -69,6 +69,30 @@ export const config = {
   openRouterReferer: env('OPENROUTER_REFERER', 'https://my-ai-studio.local'),
   openRouterTitle: env('OPENROUTER_TITLE', 'My AI Studio'),
 
+  // Google Gemini is reached through its OpenAI-compatible surface, so it
+  // shares the chat-completions shape with the other providers. The key and the
+  // endpoint are its own: Gemini traffic must never transit OpenRouter.
+  geminiApiKey: env('GEMINI_API_KEY'),
+  geminiModel: env('GEMINI_MODEL', 'gemini-3.6-flash'),
+  geminiBaseUrl: env('GEMINI_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta/openai'),
+  geminiTimeoutMs: int('GEMINI_TIMEOUT_MS', 120000),
+
+  groqApiKey: env('GROQ_API_KEY'),
+  groqModel: env('GROQ_MODEL', 'openai/gpt-oss-120b'),
+  groqBaseUrl: env('GROQ_BASE_URL', 'https://api.groq.com/openai/v1'),
+  groqTimeoutMs: int('GROQ_TIMEOUT_MS', 120000),
+
+  // Which provider the agent uses by default. 'auto' walks providerOrder and
+  // fails over on temporary limits only; a named provider pins the run to it.
+  aiDefaultProvider: env('AI_DEFAULT_PROVIDER', 'auto'),
+  aiProviderOrder: env('AI_PROVIDER_ORDER', 'openrouter,gemini,groq')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean),
+  // How long a provider stays out of the rotation after a quota/rate-limit
+  // response, so a run does not hammer a provider that is known to be down.
+  aiProviderCooldownMs: int('AI_PROVIDER_COOLDOWN_MS', 5 * 60 * 1000),
+
   workspaceRoot: path.resolve(env('WORKSPACE_PATH', path.join(process.cwd(), 'workspace-data', 'projects'))),
   storageRoot: path.resolve(env('STORAGE_PATH', path.join(process.cwd(), 'workspace-data', 'storage'))),
 

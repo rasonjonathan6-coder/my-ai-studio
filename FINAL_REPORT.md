@@ -20,10 +20,11 @@ inferred from intent. Every status is one of:
 | Area | Status | Evidence |
 | --- | --- | --- |
 | ENVIRONMENT | PASS | node 24.21.0, git 2.47.3, docker 29.8.1, python 3.13.15, adb 1.0.41; java 17 present only in the backend image, no JDK and no system gradle on the host (the Gradle 8.9 wrapper is used) |
-| FRONTEND | PASS | typecheck, lint, 12/12 tests, production build 432.05 kB JS / 116.64 kB gzip across 4 lazy chunks + 9.88 kB CSS; the app is served over the public work-host URL and its API proxy works from a mobile user-agent |
-| BACKEND | PASS | typecheck, lint, 49/49 tests (incl. OpenRouter tests against a real local HTTP server), real HTTP smoke 15/15 |
+| FRONTEND | PASS | typecheck, lint, 13/13 tests, production build 357.33 kB JS / 106.35 kB gzip + 3 lazy chunks + 10.23 kB CSS; the app is served over the public work-host URL and its API proxy works from a mobile user-agent |
+| BACKEND | PASS | typecheck, lint, 58/58 tests (incl. OpenRouter tests against a real local HTTP server), real HTTP smoke 15/15 |
 | DATABASE | PASS | PostgreSQL 16.15 reachable; migrations applied; auth and project rows persisted and read back |
-| OPENROUTER | PASS | live key used; HTTP 200 completion; `/api/health` reports `configured`; key never echoed |
+| OPENROUTER | PASS | live key used; HTTP 200 completion recorded; `/api/health` reports `configured`; key never echoed. As of the latest session the free-model daily quota is exhausted, so a fresh probe honestly returns `rate_limited · HTTP 429` |
+| MULTI-PROVIDER ROUTING | PARTIAL | OpenRouter, Gemini and Groq are implemented server-side and the test endpoint hits the real APIs; OpenRouter reports `rate_limited · HTTP 429`, Gemini and Groq report `NOT_CONFIGURED` (no server key). AUTO fails over only on temporary limits, never on a bad credential |
 | AGENT LOOP | PASS | live run: reading -> editing -> testing -> building -> completed; code change and APK independently verified |
 | OPENHANDS | NOT AVAILABLE | no OpenHands agent-server endpoint reachable from this environment |
 | DOCKER | PASS | backend image built; container ran; full smoke suite executed inside it; sandbox runs as uid 1000, cannot reach `169.254.169.254`, and legitimate egress still works |
@@ -194,9 +195,55 @@ full procedure. Nothing was deployed and nothing claims to be.
 
 ### GITHUB REPOSITORY
 
-This working tree has no commit yet and no configured remote; `git rev-parse
-HEAD` fails with `unknown revision`. Everything is present as untracked files.
-Pushing was not performed.
+The repository now has a committed history (`master`, 18 commits) and no
+configured remote; nothing has been pushed. Commit `0b08191` removed the
+committed dev credentials and made the CI security scan fail closed.
+The `git rev-parse HEAD` failure recorded in an earlier revision of this report
+no longer describes the tree.
+
+---
+
+## SESSION DELTA — PROVIDER ROUTING AND PREVIEW FIX
+
+Two things were re-verified after this report's first revision, and one real
+frontend bug was found and fixed.
+
+### Provider test from the UI — PASS (real result rendered)
+
+`GET /api/ai/providers` and `POST /api/ai/providers/:id/test` were driven from
+the running app over the public work-host URL. The backend log recorded
+`ai provider test failed: openrouter rate_limited status 429`, and the UI then
+rendered `FAIL · rate_limited · HTTP 429` inline on the OpenRouter row. Gemini
+and Groq rendered `NOT CONFIGURED`. No value on that panel is synthesised — the
+status, HTTP code and timing come from the response.
+
+A live agent run was also attempted in AUTO mode and failed honestly with
+`not_configured: AUTO mode: all configured providers are cooling down
+(openrouter)`. That is the correct behaviour: the run is marked `failed`, not
+retried into a pretend success.
+
+### Preview screen — real bug, fixed
+
+`PreviewResult` in `frontend/src/api/types.ts` did not match what
+`backend/src/services/androidPreview.ts` actually returns: the frontend expected
+`reason`, `apkPresent` and `logs`, while the backend sends `message`,
+`packageName`, `logcat` and a `steps` array. The screen therefore rendered
+`undefined` for the message and never showed the package or the step detail.
+
+The type and `PreviewScreen` were corrected to the real contract, and
+`frontend/src/screens/Export.test.tsx` now renders the component against the
+real backend payload and asserts the message, package and step text appear and
+that the string `undefined` does not. The test was mutation-checked: reverting
+the field to `preview.reason` turns it red.
+
+### Re-run after the fix
+
+```
+npm run typecheck  -> exit 0
+npm run lint       -> exit 0
+npm test           -> backend 58/58, frontend 13/13
+npm run build      -> 357.33 kB JS / 106.35 kB gzip, built in 1.38s
+```
 
 ---
 
@@ -395,7 +442,7 @@ went from 42 to 45 passing.
 ```
 npm run typecheck   → exit 0 (backend + frontend)
 npm run lint        → exit 0 (backend + frontend)
-npm run test        → backend 49/49 pass, frontend 12/12 pass (the job-queue
+npm run test        → backend 58/58 pass, frontend 13/13 pass (the job-queue
                       suite was added later and is mutation-checked)
 npm run build       → backend tsc clean; frontend built in 1.35s
 BASE=http://127.0.0.1:8080 bash scripts/smoke.sh → FAILURES: 0
@@ -500,14 +547,14 @@ a `failed` write, the guarded success update affects 0 rows.
 ### Test count
 
 `backend/tests/jobQueue.test.ts` was added because the queue is what prevents a
-wedged job from holding a slot forever, and it had no test. 49/49 backend,
-12/12 frontend. The suite was mutation-checked: deleting the timeout race turns
+wedged job from holding a slot forever, and it had no test. 58/58 backend,
+13/13 frontend. The suite was mutation-checked: deleting the timeout race turns
 it red (`fail 1`), and restoring the file returns it to green.
 
 ```
 npm run typecheck   -> exit 0 (backend + frontend)
 npm run lint        -> exit 0 (backend + frontend)
-npm test            -> backend 49/49, frontend 12/12
+npm test            -> backend 58/58, frontend 13/13
 npm run build       -> clean
 scripts/smoke.sh    -> FAILURES: 0, against the rebuilt container
 ```

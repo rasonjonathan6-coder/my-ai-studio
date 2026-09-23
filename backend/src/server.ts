@@ -11,6 +11,7 @@ import { rateLimit } from './middleware/rateLimit.ts';
 import authRoutes from './routes/auth.ts';
 import projectRoutes from './routes/projects.ts';
 import systemRoutes from './routes/system.ts';
+import aiRoutes from './routes/ai.ts';
 import { attachWebSocket } from './ws/server.ts';
 import { closePool, checkDatabase } from './db/pool.ts';
 import { runMigrations } from './db/migrate.ts';
@@ -52,6 +53,7 @@ export async function createApp() {
   });
 
   app.use('/api/auth', authRoutes);
+  app.use('/api/ai', aiRoutes);
   app.use('/api/projects', projectRoutes);
   app.use('/api', systemRoutes);
 

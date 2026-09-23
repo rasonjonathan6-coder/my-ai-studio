@@ -7,7 +7,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import { config } from '../config/index.ts';
 import { checkDatabase } from '../db/pool.ts';
-import { openRouter } from './openrouter.ts';
+import { aiRouter } from './aiProvider.ts';
 import { dockerAvailable, resolveBackend } from './commandRunner.ts';
 
 export type ProbeState = 'AVAILABLE' | 'NOT_AVAILABLE' | 'ERROR';
@@ -82,6 +82,11 @@ export interface SystemStatus {
   memory: { totalBytes: number; freeBytes: number; usedPercent: number };
   disk: { path: string; totalBytes: number; freeBytes: number; usedPercent: number } | null;
   probes: Probe[];
+  ai: {
+    defaultProvider: string;
+    order: string[];
+    cooldowns: Record<string, { cooling: boolean; until: string | null; reason: string | null }>;
+  };
   executionBackend: 'docker' | 'host';
   sandboxEnabled: boolean;
 }
@@ -226,11 +231,21 @@ export async function getSystemStatus(): Promise<SystemStatus> {
       : { name: 'docker', state: 'ERROR', version: docker.version, detail: 'CLI present but daemon unreachable' }
     : docker;
 
-  const orStatus = openRouter.status();
-  const openRouterProbe: Probe = orStatus.configured
-    ? { name: 'openrouter', state: 'AVAILABLE', version: orStatus.model, detail: 'API key configured (value hidden)' }
-    : { name: 'openrouter', state: 'NOT_AVAILABLE', version: orStatus.model, detail: 'OPENROUTER_API_KEY not configured' };
-
+  // One probe per AI provider. Configuration is reported separately from
+  // reachability: a configured key is not proof the provider answers, so the
+  // detail says "configured", never "connected".
+  const providerProbes: Probe[] = aiRouter.providers().map((p) => {
+    const s = p.status();
+    const cooling = aiRouter.isCooling(p.id);
+    return s.configured
+      ? {
+        name: p.id,
+        state: 'AVAILABLE',
+        version: s.model,
+        detail: cooling ? 'API key configured; in cooldown after a provider limit' : 'API key configured (value hidden)',
+      }
+      : { name: p.id, state: 'NOT_AVAILABLE', version: s.model, detail: `${p.label} API key not configured` };
+  });
   // An emulator needs a device actually attached, not just the adb binary.
   // The check runs where commands execute, so sandbox adb is consulted when the
   // docker backend is active.
@@ -261,8 +276,13 @@ export async function getSystemStatus(): Promise<SystemStatus> {
     disk,
     probes: [
       node, java, git, dockerProbe, gradle, adb, androidSdk, python,
-      dbProbe, openRouterProbe, emulatorProbe,
+      dbProbe, ...providerProbes, emulatorProbe,
     ],
+    ai: {
+      defaultProvider: config.aiDefaultProvider,
+      order: config.aiProviderOrder,
+      cooldowns: aiRouter.cooldownState(),
+    },
     executionBackend: backend,
     sandboxEnabled: config.sandbox.enabled,
   };

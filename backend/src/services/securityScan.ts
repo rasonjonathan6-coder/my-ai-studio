@@ -33,7 +33,11 @@ interface PatternDef {
 
 const PATTERNS: PatternDef[] = [
   { name: 'OPENROUTER_API_KEY', re: /OPENROUTER_API_KEY\s*[=:]\s*["']?([^\s"']{8,})/g },
+  { name: 'GEMINI_API_KEY', re: /GEMINI_API_KEY\s*[=:]\s*["']?([^\s"']{8,})/g },
+  { name: 'GROQ_API_KEY', re: /GROQ_API_KEY\s*[=:]\s*["']?([^\s"']{8,})/g },
   { name: 'sk-or-key', re: /sk-or-[A-Za-z0-9_-]{16,}/g },
+  { name: 'groq-key', re: /gsk_[A-Za-z0-9]{20,}/g },
+  { name: 'google-aq-key', re: /AQ\.[A-Za-z0-9_-]{20,}/g },
   { name: 'openrouter-host', re: /openrouter\.ai\/api\/v1\/chat\/completions/g, allowInExample: true },
   { name: 'password=', re: /password\s*=\s*["']?([^\s"'#,;]{6,})/gi },
   { name: 'secret=', re: /secret\s*=\s*["']?([^\s"'#,;]{6,})/gi },

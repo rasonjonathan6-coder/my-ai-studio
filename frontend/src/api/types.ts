@@ -61,6 +61,9 @@ export interface AgentRun {
   status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
   phase: string;
   model: string;
+  provider: string | null;
+  failover_from: string | null;
+  failover_reason: string | null;
   fix_attempts: number;
   max_fix_attempts: number;
   summary: string | null;
@@ -70,6 +73,44 @@ export interface AgentRun {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+}
+
+export interface AiProvider {
+  id: 'openrouter' | 'gemini' | 'groq';
+  label: string;
+  configured: boolean;
+  status: 'CONFIGURED' | 'NOT_CONFIGURED';
+  connection: 'NOT_TESTED' | 'PASS' | 'FAIL';
+  model: string | null;
+  endpoint: string;
+  cooling: boolean;
+  cooldownUntil: string | null;
+  cooldownReason: string | null;
+}
+
+export interface AiProvidersResponse {
+  defaultProvider: string;
+  order: string[];
+  cooldownMs: number;
+  providers: AiProvider[];
+  auto: { ready: string[]; cooling: string[]; unconfigured: string[] };
+  recentAttempts: Array<{
+    provider: string; model: string; outcome: 'ok' | 'fallback' | 'error';
+    status?: number; kind?: string; message?: string; at: string;
+  }>;
+}
+
+export interface AiProviderTestResult {
+  provider: string;
+  label: string;
+  result: 'PASS' | 'FAIL' | 'NOT_CONFIGURED';
+  model: string;
+  endpoint: string;
+  http?: number | null;
+  kind?: string;
+  durationMs?: number;
+  message?: string;
+  reply?: string;
 }
 
 export interface ApkInspection {
@@ -135,19 +176,25 @@ export interface SystemStatus {
   executionBackend: 'docker' | 'host';
   sandboxEnabled: boolean;
   probes: SystemProbe[];
+  ai?: {
+    defaultProvider: string;
+    order: string[];
+    cooldowns: Record<string, { cooling: boolean; until: string | null; reason: string | null }>;
+  };
   jobs: { active: number; pending: number; max: number };
 }
 
 export interface PreviewResult {
   available: boolean;
-  reason: string;
+  status: string;
   devices: string[];
-  apkPresent: boolean;
-  installed?: boolean;
-  launched?: boolean;
-  logs?: string;
-  status?: string;
-  note?: string;
+  installed: boolean;
+  launched: boolean;
+  packageName: string | null;
+  logcat: string[];
+  screenshots: string[];
+  message: string;
+  steps: Array<{ step: string; ok: boolean; detail: string }>;
 }
 
 export interface ExportResult {

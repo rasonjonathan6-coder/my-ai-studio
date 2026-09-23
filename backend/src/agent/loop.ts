@@ -3,14 +3,16 @@
  * a bounded INSPECT -> FIX -> REBUILD retry cycle.
  *
  * The model decides which tools to call. Every tool call is executed against
- * the real workspace. If OpenRouter is not configured the run fails explicitly
- * with OPENROUTER_NOT_CONFIGURED - the loop never falls back to a scripted
- * "pretend" edit.
+ * the real workspace. The model transport is chosen by the AI provider router:
+ * OpenRouter, Gemini or Groq, with automatic failover in AUTO mode. If no
+ * provider is configured the run fails explicitly with PROVIDER_NOT_CONFIGURED -
+ * the loop never falls back to a scripted "pretend" edit.
  */
 import { query } from '../db/pool.ts';
 import { config } from '../config/index.ts';
 import { logger, redact } from '../lib/logger.ts';
-import { openRouter, type ChatMessage } from '../services/openrouter.ts';
+import { type ChatMessage } from '../services/providerClient.ts';
+import { aiRouter, isProviderSelection, type ProviderId, type ProviderSelection } from '../services/aiProvider.ts';
 import { WorkspaceService } from '../services/workspace.ts';
 import { agentEvent, logEvent, type AgentPhase } from '../services/eventBus.ts';
 import { runTests } from '../services/tests.ts';
@@ -27,6 +29,8 @@ export interface AgentRunOptions {
   agentRunId: string;
   conversationId: string | null;
   signal?: AbortSignal;
+  /** 'auto' walks the provider order; a provider id pins the run to it. */
+  provider?: ProviderSelection;
 }
 
 export interface AgentRunOutcome {
@@ -164,11 +168,23 @@ function parseToolCall(text: string): ToolCallRequest | { done: true; summary: s
 
 export async function runAgent(options: AgentRunOptions): Promise<AgentRunOutcome> {
   const { projectId, ownerId, prompt, agentRunId, signal } = options;
+  const selection: ProviderSelection = options.provider ?? (isProviderSelection(config.aiDefaultProvider) ? config.aiDefaultProvider : 'auto');
 
-  if (!openRouter.isConfigured()) {
-    const message = 'OPENROUTER_NOT_CONFIGURED: set OPENROUTER_API_KEY on the server to enable the AI agent. No agent actions were performed.';
-    await updateRun(agentRunId, {
+  const anyConfigured = aiRouter.providers().some((p) => p.isConfigured());
+  if (!anyConfigured) {
+    const message = 'PROVIDER_NOT_CONFIGURED: none of OPENROUTER_API_KEY, GEMINI_API_KEY or GROQ_API_KEY is set on the server. No agent actions were performed.';
+    await finishRun(agentRunId, {
       status: 'failed', phase: 'failed', error: message, finished_at: new Date().toISOString(),
+    });
+    agentEvent(projectId, 'failed', message, { agentRunId });
+    logEvent(projectId, 'build_log', 'error', message);
+    return { status: 'failed', summary: message, fixAttempts: 0, finalPhase: 'failed' };
+  }
+  if (selection !== 'auto' && !aiRouter.adapter(selection).isConfigured()) {
+    const message = `PROVIDER_NOT_CONFIGURED: ${aiRouter.adapter(selection).label} was selected but its API key is not set on the server. No agent actions were performed.`;
+    await finishRun(agentRunId, {
+      status: 'failed', phase: 'failed', error: message, provider: selection,
+      finished_at: new Date().toISOString(),
     });
     agentEvent(projectId, 'failed', message, { agentRunId });
     logEvent(projectId, 'build_log', 'error', message);
@@ -181,13 +197,22 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunOutcom
   const ws = new WorkspaceService(projectId);
   await ws.ensure();
 
-  await updateRun(agentRunId, {
-    status: 'running', phase: 'analyzing', started_at: new Date().toISOString(), model: config.openRouterModel,
+  const initialProvider = selection === 'auto' ? aiRouter.autoOrder().ready[0] ?? null : selection;
+  const started = await finishRun(agentRunId, {
+    status: 'running', phase: 'analyzing', started_at: new Date().toISOString(),
+    model: initialProvider ? aiRouter.adapter(initialProvider).status().model : null,
   });
+  if (!started) {
+    // A timeout or a user cancel already recorded a terminal status; do not
+    // resurrect the row by marking it running again.
+    return { status: 'cancelled', summary: 'agent run already finished before it started', fixAttempts: 0, finalPhase: 'failed' };
+  }
 
   const onPhase = (phase: AgentPhase, message: string): void => {
     agentEvent(projectId, phase, message, { agentRunId });
-    void updateRun(agentRunId, { phase });
+    // Once the run is aborted its row may already hold a terminal status; a
+    // late phase write would leave a failed run displaying "building".
+    if (!signal?.aborted) void updateRun(agentRunId, { phase });
   };
 
   // ---------- ANALYZE (real filesystem + toolchain inspection) ---------------
@@ -218,25 +243,57 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunOutcom
   let lastBuildFailureLog = '';
   let tokensIn = 0;
   let tokensOut = 0;
+  // Which provider actually served the run, and whether AUTO had to switch.
+  let activeProvider: ProviderId | null = initialProvider;
+  let failoverFrom: ProviderId | null = null;
+  let failoverReason = '';
+  let recordedModel = activeProvider ? aiRouter.adapter(activeProvider).status().model : '';
 
   const callModel = async (): Promise<{ ok: boolean; text: string; error?: string }> => {
-    // Free-tier models are rate limited aggressively. A 429 is transient, so
-    // wait out the provider's Retry-After before giving up on the step instead
-    // of failing the whole run on the first throttle.
+    // Free-tier models are rate limited aggressively. The router handles
+    // failover across providers; this loop only waits out a provider's own
+    // short retry-after when AUTO still came back with a transient throttle.
     for (let waitRound = 0; waitRound < 4; waitRound += 1) {
-      const result = await openRouter.chat({
+      const routed = await aiRouter.chat(selection, {
         messages: messages.slice(-MAX_HISTORY_MESSAGES),
         signal,
+      }, (record) => {
+        if (record.outcome === 'ok') return;
+        logEvent(projectId, 'build_log', 'warn', `provider ${record.provider} ${record.outcome}: ${record.message ?? ''}`);
       });
-      if (result.ok) {
-        tokensIn += result.usage.promptTokens;
-        tokensOut += result.usage.completionTokens;
-        return { ok: true, text: result.content };
+
+      if (routed.ok) {
+        activeProvider = routed.provider;
+        if (routed.failoverFrom) {
+          failoverFrom = routed.failoverFrom;
+          failoverReason = `${routed.failoverFrom} unavailable; ${routed.provider} answered`;
+          logEvent(projectId, 'build_log', 'warn', `AI failover: ${routed.failoverFrom} -> ${routed.provider}`);
+        }
+        recordedModel = routed.model;
+        tokensIn += routed.usage.promptTokens;
+        tokensOut += routed.usage.completionTokens;
+        return { ok: true, text: routed.content };
       }
-      if (result.kind !== 'rate_limited' || waitRound === 3 || signal?.aborted) {
-        return { ok: false, text: '', error: `${result.kind}: ${result.message}` };
+
+      // Even on failure, record the provider that actually refused so the run's
+      // diagnostic names it instead of leaving the column null.
+      activeProvider = routed.provider ?? activeProvider;
+      if (!failoverFrom && routed.attempts.length > 1) {
+        const first = routed.attempts[0];
+        const last = routed.attempts[routed.attempts.length - 1];
+        if (first.provider !== last.provider) {
+          failoverFrom = first.provider;
+          failoverReason = `${first.provider} unavailable; ${last.provider} also failed`;
+        }
       }
-      const pauseMs = result.retryAfterMs ?? 15000;
+
+      // A hard quota will not clear inside this run, so waiting is pointless;
+      // only a short throttle with an elapsed retry window is worth waiting on.
+      const worthWaiting = routed.kind === 'rate_limited' && routed.retryable === true && routed.quotaExhausted !== true;
+      if (!worthWaiting || waitRound === 3 || signal?.aborted) {
+        return { ok: false, text: '', error: `${routed.kind}: ${routed.message}` };
+      }
+      const pauseMs = 15000;
       logEvent(projectId, 'build_log', 'warn', `model rate limited, waiting ${pauseMs}ms before retrying the step`);
       await new Promise((resolve) => setTimeout(resolve, pauseMs));
     }
@@ -245,7 +302,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunOutcom
 
   for (let attempt = 0; attempt <= maxFixAttempts; attempt += 1) {
     if (signal?.aborted) {
-      await updateRun(agentRunId, { status: 'cancelled', phase: 'failed', error: 'cancelled', finished_at: new Date().toISOString() });
+      await finishRun(agentRunId, { status: 'cancelled', phase: 'failed', error: 'cancelled', finished_at: new Date().toISOString() });
       return { status: 'cancelled', summary: 'agent run cancelled', fixAttempts, finalPhase: 'failed' };
     }
 
@@ -264,14 +321,14 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunOutcom
 
     while (step < MAX_STEPS_PER_ATTEMPT && !finished) {
       if (signal?.aborted) {
-        await updateRun(agentRunId, { status: 'cancelled', phase: 'failed', error: 'cancelled', finished_at: new Date().toISOString() });
+        await finishRun(agentRunId, { status: 'cancelled', phase: 'failed', error: 'cancelled', finished_at: new Date().toISOString() });
         return { status: 'cancelled', summary: 'agent run cancelled', fixAttempts, finalPhase: 'failed' };
       }
       step += 1;
 
       const modelResult = await callModel();
       if (!modelResult.ok) {
-        await updateRun(agentRunId, {
+        await finishRun(agentRunId, {
           status: 'failed', phase: 'failed', error: modelResult.error ?? 'model call failed',
           tokens_in: tokensIn, tokens_out: tokensOut, finished_at: new Date().toISOString(),
         });
@@ -360,6 +417,10 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunOutcom
         fix_attempts: fixAttempts,
         tokens_in: tokensIn,
         tokens_out: tokensOut,
+        provider: activeProvider,
+        model: recordedModel || null,
+        failover_from: failoverFrom,
+        failover_reason: failoverReason || null,
         finished_at: new Date().toISOString(),
       });
       if (!recorded) {
@@ -373,9 +434,11 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunOutcom
     if (attempt === maxFixAttempts) {
       const message = `MAX_FIX_ATTEMPTS_REACHED after ${maxFixAttempts} attempts. Last failure:\n${lastBuildFailureLog.slice(-4000)}`;
       onPhase('failed', 'MAX_FIX_ATTEMPTS_REACHED');
-      await updateRun(agentRunId, {
+      await finishRun(agentRunId, {
         status: 'limit_reached', phase: 'failed', error: 'MAX_FIX_ATTEMPTS_REACHED',
         summary: message, fix_attempts: fixAttempts, tokens_in: tokensIn, tokens_out: tokensOut,
+        provider: activeProvider, model: recordedModel || null,
+        failover_from: failoverFrom, failover_reason: failoverReason || null,
         finished_at: new Date().toISOString(),
       });
       agentEvent(projectId, 'failed', 'MAX_FIX_ATTEMPTS_REACHED', { agentRunId });

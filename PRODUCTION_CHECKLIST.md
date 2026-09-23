@@ -17,11 +17,11 @@ on that machine's toolchain.
 | --- | --- | --- |
 | Backend typecheck | PASS | `npm run typecheck` clean |
 | Backend lint | PASS | `npm run lint` clean |
-| Backend tests | PASS | `npm test` - 49 tests, 49 pass; the job-queue suite is mutation-checked (removing the timeout race turns it red) |
+| Backend tests | PASS | `npm test` - 58 tests, 58 pass; the job-queue suite is mutation-checked (removing the timeout race turns it red) |
 | Backend build (`tsc`) | PASS | emits `backend/dist/server.js` |
 | Frontend typecheck | PASS | `tsc --noEmit` clean |
 | Frontend lint | PASS | `eslint` clean |
-| Frontend tests | PASS | `vitest run` - 12 tests, 12 pass |
+| Frontend tests | PASS | `vitest run` - 13 tests, 13 pass |
 | Frontend production build | PASS | `vite build` emits `frontend/dist` |
 | Bundle contains no secrets | PASS | grep of `dist/` for key patterns is empty |
 
@@ -42,6 +42,9 @@ on that machine's toolchain.
 | Health endpoint | PASS | `GET /api/health` returns `{"ok":true,...}` |
 | System status probes | PASS | `GET /api/system/status` reports each component |
 | OpenRouter integration | PASS | live key configured; HTTP 200 completion; `/api/health` reports `configured`; daily-quota 429 handled honestly |
+| Multi-provider routing (OpenRouter/Gemini/Groq) | PARTIAL | `GET /api/ai/providers` and `/api/ai/providers/:id/test` run against the real provider APIs; OpenRouter reports `rate_limited · HTTP 429` while its free-model daily quota is exhausted, and Gemini/Groq report `NOT_CONFIGURED` because no server key is set. AUTO fails over only on temporary limits, never on a bad credential |
+| Provider key isolation | PASS | provider keys are read server-side only; the test endpoint masks them and no key reaches the frontend bundle or an attempt record |
+| Android preview endpoint | NOT AVAILABLE | real `adb devices` probe returns no attached device; the endpoint answers `ANDROID PREVIEW: NOT AVAILABLE` and the UI shows no mocked frame |
 | Agent loop (real tools) | PASS | run reached `succeeded`; source file repaired on disk and APK hash matched the inspection record |
 | Docker sandbox | PASS | commands ran in the sandbox image as uid 1000 with no socket |
 

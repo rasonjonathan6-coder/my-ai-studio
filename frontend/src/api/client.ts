@@ -1,7 +1,10 @@
 import type {
-  AgentRun, BuildResult, CommandResult, Conversation, ExportResult, FileEntry,
-  Message, PreviewResult, Project, SecurityScan, SystemStatus, User,
+  AgentRun, AiProviderTestResult, AiProvidersResponse, BuildResult, CommandResult, Conversation,
+  ExportResult, FileEntry, Message, PreviewResult, Project, SecurityScan, SystemStatus, User,
 } from './types.ts';
+
+/** Which provider the agent should use: 'auto' or a specific provider id. */
+export type ProviderSelection = 'auto' | 'openrouter' | 'gemini' | 'groq';
 
 /**
  * The API base URL. Only VITE_API_URL is read, and it must never contain a
@@ -98,11 +101,18 @@ export const api = {
   terminalHistory: (id: string) => request<{ commands: CommandResult[] }>(`/api/projects/${id}/terminal`),
 
   // agent
-  runAgent: (id: string, prompt: string) =>
-    request<{ agentRunId: string; status: string }>(`/api/projects/${id}/agent/run`, json({ prompt })),
+  runAgent: (id: string, prompt: string, provider: ProviderSelection = 'auto') =>
+    request<{ agentRunId: string; status: string }>(`/api/projects/${id}/agent/run`, json({ prompt, provider })),
   agentRuns: (id: string) => request<{ runs: AgentRun[] }>(`/api/projects/${id}/agent/runs`),
   cancelAgent: (id: string, runId: string) =>
     request<{ cancelled: boolean }>(`/api/projects/${id}/agent/runs/${runId}/cancel`, { method: 'POST' }),
+
+  // ai providers
+  aiProviders: () => request<AiProvidersResponse>('/api/ai/providers'),
+  testAiProvider: (provider: string) =>
+    request<AiProviderTestResult>(`/api/ai/providers/${provider}/test`, { method: 'POST', ...json({}) }),
+  resetAiProvider: (provider: string) =>
+    request<{ provider: string; cooldownCleared: boolean }>(`/api/ai/providers/${provider}/reset`, { method: 'POST' }),
 
   // tests / builds
   runTests: (id: string) => request<{ test: { status: string; framework: string | null; command: string | null; passed: number; failed: number; skipped: number; durationMs: number; log: string; error: string | null } }>(`/api/projects/${id}/test`, { method: 'POST' }),

@@ -144,6 +144,10 @@ a { color: var(--cyan); text-decoration: none; }
 .pill-run { background: rgba(34, 211, 238, 0.14); color: var(--cyan); border-color: rgba(34, 211, 238, 0.35); }
 
 .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.dot-ok { color: var(--ok); }
+.dot-warn { color: var(--warn); }
+.dot-off { color: var(--text-faint); }
+.muted { color: var(--text-dim); }
 .dot-pulse { animation: pulse 1.4s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.28; } }
 

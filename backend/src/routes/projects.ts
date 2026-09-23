@@ -18,6 +18,7 @@ import { scanProject } from '../services/securityScan.ts';
 import { previewApk } from '../services/androidPreview.ts';
 import { inspectApk } from '../services/apkInspect.ts';
 import { enqueueAgentRun } from '../agent/loop.ts';
+import { aiRouter, isProviderSelection } from '../services/aiProvider.ts';
 import { query } from '../db/pool.ts';
 import { jobQueue } from '../services/jobQueue.ts';
 import { PathSecurityError } from '../lib/paths.ts';
@@ -282,22 +283,31 @@ router.get('/:id/terminal', asyncHandler(async (req, res) => {
 
 // --------------------------------- agent -------------------------------------
 
-const agentSchema = z.object({ prompt: z.string().min(1).max(8000) });
+const agentSchema = z.object({
+  prompt: z.string().min(1).max(8000),
+  // 'auto' lets the router pick and fail over; a provider id pins the run.
+  provider: z.enum(['auto', 'openrouter', 'gemini', 'groq']).optional(),
+});
 
 router.post('/:id/agent/run', agentLimiter, asyncHandler(async (req, res) => {
   const project = await loadOwnedProject(req);
   const body = validate(agentSchema, req.body);
+  const provider = body.provider ?? (isProviderSelection(config.aiDefaultProvider) ? config.aiDefaultProvider : 'auto');
   const conversation = await getOrCreateConversation(project!.id, req.user!.id);
   await addMessage(conversation.id, 'user', body.prompt);
+
+  const providerModel = provider === 'auto'
+    ? aiRouter.autoOrder().ready[0] ? aiRouter.adapter(aiRouter.autoOrder().ready[0]).status().model : null
+    : aiRouter.adapter(provider).status().model;
 
   const runRow = await query<{ id: string }>(
     `INSERT INTO agent_runs (project_id, conversation_id, owner_id, prompt, status, phase, model, max_fix_attempts)
      VALUES ($1, $2, $3, $4, 'queued', 'queued', $5, $6) RETURNING id`,
-    [project!.id, conversation.id, req.user!.id, body.prompt, config.openRouterModel, config.maxFixAttempts],
+    [project!.id, conversation.id, req.user!.id, body.prompt, providerModel, config.maxFixAttempts],
   );
   const agentRunId = runRow.rows[0].id;
 
-  await audit({ userId: req.user!.id, projectId: project!.id, action: 'agent.run.start', ip: req.ip ?? null, detail: { agentRunId } });
+  await audit({ userId: req.user!.id, projectId: project!.id, action: 'agent.run.start', ip: req.ip ?? null, detail: { agentRunId, provider } });
 
   // Run asynchronously; progress reaches the client over WebSocket.
   void enqueueAgentRun({
@@ -306,6 +316,7 @@ router.post('/:id/agent/run', agentLimiter, asyncHandler(async (req, res) => {
     prompt: body.prompt,
     agentRunId,
     conversationId: conversation.id,
+    provider,
   }).then(async (outcome) => {
     await addMessage(conversation.id, 'assistant', outcome.summary, { agentRunId, status: outcome.status });
     await audit({ userId: req.user!.id, projectId: project!.id, action: 'agent.run.finish', outcome: outcome.status, detail: { agentRunId } });
@@ -321,7 +332,9 @@ router.post('/:id/agent/run', agentLimiter, asyncHandler(async (req, res) => {
 router.get('/:id/agent/runs', asyncHandler(async (req, res) => {
   const project = await loadOwnedProject(req);
   const runs = await query(
-    `SELECT id, status, phase, model, fix_attempts, max_fix_attempts, summary, error, tokens_in, tokens_out, created_at, started_at, finished_at
+    `SELECT id, status, phase, model, provider, failover_from, failover_reason,
+            fix_attempts, max_fix_attempts, summary, error, tokens_in, tokens_out,
+            created_at, started_at, finished_at
      FROM agent_runs WHERE project_id = $1 ORDER BY created_at DESC LIMIT 20`,
     [project!.id],
   );

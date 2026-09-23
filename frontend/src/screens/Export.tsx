@@ -39,16 +39,22 @@ export function PreviewScreen({ projectId }: { projectId: string }) {
           <>
             <div className="row">
               <StatePill value={preview.available ? 'AVAILABLE' : 'NOT_AVAILABLE'} />
-              <span className="hint">{preview.reason}</span>
+              <span className="hint">{preview.message}</span>
             </div>
             <div className="kv"><span>adb devices</span><span>{preview.devices.length > 0 ? preview.devices.join(', ') : '(none)'}</span></div>
-            <div className="kv"><span>apk present</span><span>{String(preview.apkPresent)}</span></div>
-            {preview.installed !== undefined && <div className="kv"><span>installed</span><span>{String(preview.installed)}</span></div>}
-            {preview.launched !== undefined && <div className="kv"><span>launched</span><span>{String(preview.launched)}</span></div>}
-            {preview.logs && (
+            <div className="kv"><span>package</span><span>{preview.packageName ?? '(unknown)'}</span></div>
+            <div className="kv"><span>installed</span><span>{String(preview.installed)}</span></div>
+            <div className="kv"><span>launched</span><span>{String(preview.launched)}</span></div>
+            {preview.steps.map((s) => (
+              <div className="kv" key={s.step}>
+                <span>{s.ok ? '✓' : '✗'} {s.step}</span>
+                <span>{s.detail}</span>
+              </div>
+            ))}
+            {preview.logcat.length > 0 && (
               <details style={{ marginTop: 10 }}>
                 <summary className="hint">Device logs</summary>
-                <pre className="term" style={{ maxHeight: '30vh', marginTop: 8 }}>{preview.logs}</pre>
+                <pre className="term" style={{ maxHeight: '30vh', marginTop: 8 }}>{preview.logcat.join('\n')}</pre>
               </details>
             )}
             {!preview.available && (

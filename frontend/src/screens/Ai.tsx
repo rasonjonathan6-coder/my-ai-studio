@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api } from '../api/client.ts';
+import { api, type ProviderSelection } from '../api/client.ts';
 import { Card, Empty, StatePill, Spinner } from '../components/ui.tsx';
 import { AGENT_STEPS, stepIndex } from '../lib/steps.ts';
-import type { AgentRun, Message, WsEvent } from '../api/types.ts';
+import type { AgentRun, AiProvidersResponse, Message, WsEvent } from '../api/types.ts';
 
 export interface AgentProgress { phase: string; status: string; fixAttempts: number; maxFixAttempts: number }
+
+const PROVIDER_LABEL: Record<string, string> = {
+  auto: 'AUTO', openrouter: 'OpenRouter', gemini: 'Gemini', groq: 'Groq',
+};
 
 export function AiScreen({ projectId, socketConnected, events, onAgentState }: {
   projectId: string;
@@ -19,6 +23,8 @@ export function AiScreen({ projectId, socketConnected, events, onAgentState }: {
   const [run, setRun] = useState<AgentRun | null>(null);
   const [steps, setSteps] = useState<Array<{ key: string; state: 'pending' | 'active' | 'done' | 'failed' }>>([]);
   const [agentState, setAgentState] = useState<AgentProgress | null>(null);
+  const [providers, setProviders] = useState<AiProvidersResponse | null>(null);
+  const [provider, setProvider] = useState<ProviderSelection>('auto');
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Push progress upward so the workspace header can show the real phase.
@@ -45,7 +51,20 @@ export function AiScreen({ projectId, socketConnected, events, onAgentState }: {
     }
   }, [projectId, onAgentState]);
 
-  useEffect(() => { void load(); }, [load]);
+  // Real provider configuration read from the server, refreshed when a run ends
+  // so a cooldown that just started is reflected.
+  const loadProviders = useCallback(async () => {
+    try {
+      const res = await api.aiProviders();
+      setProviders(res);
+      if (res.defaultProvider) setProvider((prev) => (prev === 'auto' ? (res.defaultProvider as ProviderSelection) : prev));
+    } catch {
+      // The provider panel is informational; a failure here must not blank the chat.
+      setProviders(null);
+    }
+  }, []);
+
+  useEffect(() => { void load(); void loadProviders(); }, [load, loadProviders]);
 
   // Apply real agent_status frames as they arrive over the socket.
   useEffect(() => {
@@ -65,8 +84,9 @@ export function AiScreen({ projectId, socketConnected, events, onAgentState }: {
     }
     if (status === 'succeeded' || status === 'failed' || status === 'cancelled') {
       void load();
+      void loadProviders();
     }
-  }, [events, load, onAgentState]);
+  }, [events, load, loadProviders, onAgentState]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -84,7 +104,7 @@ export function AiScreen({ projectId, socketConnected, events, onAgentState }: {
     }]);
     setSteps(AGENT_STEPS.map((s, i) => ({ key: s.key, state: i === 0 ? 'active' : 'pending' })));
     try {
-      const res = await api.runAgent(projectId, text);
+      const res = await api.runAgent(projectId, text, provider);
       onAgentState({ phase: 'analyzing', status: 'running', fixAttempts: 0, maxFixAttempts: 5 });
       void res;
     } catch (err) {
@@ -93,7 +113,7 @@ export function AiScreen({ projectId, socketConnected, events, onAgentState }: {
     } finally {
       setBusy(false);
     }
-  }, [prompt, projectId, onAgentState]);
+  }, [prompt, projectId, onAgentState, provider]);
 
   const cancel = useCallback(async () => {
     if (!run) return;
@@ -144,7 +164,24 @@ export function AiScreen({ projectId, socketConnected, events, onAgentState }: {
         )}
         {run?.error && <p className="error-text" role="alert" style={{ marginTop: 10 }}>{run.error}</p>}
         {run?.summary && <p style={{ marginTop: 10, fontSize: 13.5, whiteSpace: 'pre-wrap' }}>{run.summary}</p>}
+        {run?.provider && (
+          <p className="muted" style={{ marginTop: 8, fontSize: 12.5 }}>
+            served by {PROVIDER_LABEL[run.provider] ?? run.provider}
+            {run.failover_from ? ` (failed over from ${PROVIDER_LABEL[run.failover_from] ?? run.failover_from})` : ''}
+          </p>
+        )}
       </Card>
+
+      <div style={{ marginTop: 12 }}>
+        <ProviderPanel
+          providers={providers}
+          selected={provider}
+          onSelect={setProvider}
+          disabled={active}
+          onChanged={() => void loadProviders()}
+          onError={setError}
+        />
+      </div>
 
       <div style={{ marginTop: 12 }}>
         <Card title="Conversation" actions={<button className="btn btn-ghost btn-sm" onClick={() => void load()}>Reload</button>}>
@@ -177,6 +214,95 @@ export function AiScreen({ projectId, socketConnected, events, onAgentState }: {
         </Card>
       </div>
     </div>
+  );
+}
+
+function ProviderPanel({ providers, selected, onSelect, disabled, onChanged, onError }: {
+  providers: AiProvidersResponse | null;
+  selected: ProviderSelection;
+  onSelect: (p: ProviderSelection) => void;
+  disabled: boolean;
+  onChanged: () => void;
+  onError: (message: string) => void;
+}) {
+  const [testing, setTesting] = useState<string | null>(null);
+  const [results, setResults] = useState<Record<string, string>>({});
+
+  const test = useCallback(async (id: string) => {
+    setTesting(id);
+    try {
+      const res = await api.testAiProvider(id);
+      const detail = res.result === 'PASS'
+        ? `PASS · HTTP ${res.http} · ${res.durationMs}ms`
+        : res.result === 'NOT_CONFIGURED'
+          ? 'NOT CONFIGURED'
+          : `FAIL · ${res.kind ?? 'error'}${res.http ? ` · HTTP ${res.http}` : ''}`;
+      setResults((prev) => ({ ...prev, [id]: detail }));
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTesting(null);
+    }
+  }, [onError]);
+
+  const reset = useCallback(async (id: string) => {
+    try {
+      await api.resetAiProvider(id);
+      onChanged();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err));
+    }
+  }, [onChanged, onError]);
+
+  const options: ProviderSelection[] = ['auto', 'openrouter', 'gemini', 'groq'];
+
+  return (
+    <Card
+      title="AI engine"
+      subtitle="Keys stay on the server. AUTO fails over only on temporary provider limits."
+      actions={<StatePill value={providers?.auto.ready.length ? `READY ${providers.auto.ready.join(',')}` : 'NO PROVIDER READY'} />}
+    >
+      <div className="row" style={{ flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
+        <label className="sr-only" htmlFor="ai-provider">AI provider</label>
+        <select
+          id="ai-provider" className="select" value={selected} disabled={disabled}
+          onChange={(e) => onSelect(e.target.value as ProviderSelection)}
+        >
+          {options.map((o) => <option key={o} value={o}>{PROVIDER_LABEL[o] ?? o}</option>)}
+        </select>
+        {disabled && <span className="muted" style={{ fontSize: 12.5 }}>A run is active; provider is fixed for it.</span>}
+      </div>
+
+      {!providers && <Empty>Provider status unavailable.</Empty>}
+      {providers && (
+        <ul className="step-list">
+          {providers.providers.map((p) => (
+            <li key={p.id} className="step">
+              <span className={`dot ${p.configured ? (p.cooling ? 'warn' : 'ok') : 'off'}`} aria-hidden="true" />
+              <span>
+                {p.label}
+                <span className="muted" style={{ marginLeft: 6, fontSize: 12 }}>
+                  {p.configured ? (p.cooling ? 'cooling down' : 'configured') : 'NOT CONFIGURED'}
+                </span>
+                {results[p.id] && <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>{results[p.id]}</span>}
+              </span>
+              <span className="row" style={{ marginLeft: 'auto', gap: 6 }}>
+                {p.cooling && (
+                  <button className="btn btn-ghost btn-sm" onClick={() => void reset(p.id)}>Reset</button>
+                )}
+                <button
+                  className="btn btn-ghost btn-sm"
+                  disabled={!p.configured || testing === p.id}
+                  onClick={() => void test(p.id)}
+                >
+                  {testing === p.id ? 'Testing' : 'Test'}
+                </button>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
   );
 }
 

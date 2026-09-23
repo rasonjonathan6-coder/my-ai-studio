@@ -51,7 +51,18 @@ deliberately with a `../` payload and asserts is refused.
 
 - Commands run with the project workspace as the working directory.
 - An environment allowlist strips secrets before the child process starts.
-- A denylist rejects destructive patterns on the host backend.
+- A denylist rejects destructive patterns. Two tiers exist, because the same
+  command means different things in each backend:
+  - patterns whose target is the execution environment itself (`rm -rf /`,
+    `rm -rf /workspace`, fork bombs, disk-wiping operations, `/etc/shadow`,
+    reverse shells, pipe-to-shell downloads) are rejected on **both** backends.
+    They matter in the sandbox too: the project is mounted read-write at
+    `/workspace`, so without this a single `rm -rf /workspace` would destroy the
+    project the command was meant to build.
+  - patterns that only make sense on the host (Docker socket access, `sudo`,
+    `shutdown`) are rejected on the host backend only, since they are impossible
+    or harmless inside the container and blocking them there would break
+    legitimate build steps.
 - Every command has a wall-clock timeout and an output byte cap; excess output is
   truncated and the truncation is reported.
 - With `SANDBOX_ENABLED=true` commands run in an ephemeral Docker container as a
@@ -137,6 +148,12 @@ with these flags in place.
 - **No penetration test has been performed.** Controls above are tested by the
   smoke script and the CI security workflow, which is not the same as an
   independent audit.
+- **The sandbox mounts the project read-write.** A command that deletes files
+  inside the project - including its own source - is legitimate and allowed, so
+  the deny list cannot prevent a model from damaging the project it is working
+  on. It only refuses the patterns that wipe the mount root. Recovery relies on
+  the export/ZIP history and on re-scaffolding from a template, not on the
+  sandbox preventing the deletion.
 
 ## Reporting a vulnerability
 

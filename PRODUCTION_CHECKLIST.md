@@ -17,7 +17,7 @@ on that machine's toolchain.
 | --- | --- | --- |
 | Backend typecheck | PASS | `npm run typecheck` clean |
 | Backend lint | PASS | `npm run lint` clean |
-| Backend tests | PASS | `npm test` - 42 tests, 42 pass |
+| Backend tests | PASS | `npm test` - 45 tests, 45 pass |
 | Backend build (`tsc`) | PASS | emits `backend/dist/server.js` |
 | Frontend typecheck | PASS | `tsc --noEmit` clean |
 | Frontend lint | PASS | `eslint` clean |
@@ -35,7 +35,8 @@ on that machine's toolchain.
 | Unauthenticated access denied | PASS | smoke asserts 401/403 |
 | Path traversal blocked | PASS | unit tests plus a live request in the smoke suite |
 | Real terminal execution | PASS | stdout/stderr/exit code/duration returned |
-| WebSocket event stream | PASS | agent and build events delivered to the client |
+| Destructive-command policy | PASS | `rm -rf /` and `rm -rf /workspace` both return exit 126 with `BLOCKED BY POLICY` on the docker backend; the project keeps its files and `./gradlew --version` still runs |
+| WebSocket event stream | PASS | live run delivered `connected`, `build_log` (429 backoff) and `agent_status` events to a real client |
 | Rate limiting | PASS | limiter middleware active on API, auth, terminal, agent, build |
 | Graceful shutdown | PASS | SIGTERM/SIGINT close server, sockets and pool |
 | Health endpoint | PASS | `GET /api/health` returns `{"ok":true,...}` |

@@ -338,13 +338,46 @@ docker`, `sandboxEnabled: true`, `jobs: {active:0, pending:0, max:3}`.
 ```
 npm run typecheck   → exit 0 (backend + frontend)
 npm run lint        → exit 0 (backend + frontend)
-npm run test        → backend 42/42 pass, frontend 12/12 pass
+npm run test        → backend 42/42 pass, frontend 12/12 pass (45/45 after the
+                      sandbox delete-policy fix, see below)
 npm run build       → backend tsc clean; frontend built in 1.40s
 ```
 
 Three OpenRouter tests were added for the 429 paths: `Retry-After` is surfaced,
 a daily quota is reported with its reset time and not retried, and a retryable
 failure still retries up to the configured maximum.
+
+### Sandbox delete policy — a real gap found by testing
+
+While probing isolation, `rm -rf / --no-preserve-root` was run through the real
+terminal endpoint. It returned a **shell** denial from the container's own
+permissions (`rm: cannot remove '/root': Permission denied`), but the run also
+emptied that project's workspace. Investigation showed why: the deny list was
+only consulted when the backend was `host`. In the docker sandbox the project is
+mounted read-write at `/workspace`, so a command naming the mount root destroys
+the project it was meant to build. Blast radius was verified to be exactly the
+one project - other workspaces, `/data/storage` and the database were untouched.
+
+Fixed by splitting the patterns into two tiers:
+
+- environment-targeting patterns (`rm -rf /`, `rm -rf /workspace`, fork bombs,
+  disk wipes, `/etc/shadow`, reverse shells, pipe-to-shell downloads) now apply
+  on **every** backend;
+- host-only patterns (docker socket, `sudo`, `shutdown`) remain host-only, since
+  blocking them inside the container would only break legitimate build steps.
+
+Verified against the live stack after rebuild:
+
+```
+POST .../terminal {"command":"rm -rf /workspace"}  → exit 126, "BLOCKED BY POLICY: refusing rm on the mounted project root"
+POST .../terminal {"command":"rm -rf /"}           → exit 126, "BLOCKED BY POLICY: refusing rm on /"
+POST .../terminal {"command":"./gradlew --version"}→ exit 0
+project file count before/after the two attempts  → 19 / 19
+```
+
+Three tests were added (`sandboxDenyReason` blocks the environment-targeting set,
+allows the host-only set, and `denyReasonFor` picks per backend). Backend suite
+went from 42 to 45 passing.
 
 ### Still open after this addendum
 
@@ -354,4 +387,15 @@ failure still retries up to the configured maximum.
    proven by the scripted-transport run above.
 2. GitHub Actions remain `NOT TESTED` (never dispatched on a runner).
 3. No emulator host is available, so Android preview stays `NOT AVAILABLE`.
-4. The tree is still uncommitted.
+4. The tree is committed locally (`aa7d7f1` and later) but has no remote, so
+   nothing has been pushed.
+
+### Addendum verification commands
+
+```
+npm run typecheck   → exit 0 (backend + frontend)
+npm run lint        → exit 0 (backend + frontend)
+npm run test        → backend 45/45 pass, frontend 12/12 pass
+npm run build       → backend tsc clean; frontend built in 1.35s
+BASE=http://127.0.0.1:8080 bash scripts/smoke.sh → FAILURES: 0
+```

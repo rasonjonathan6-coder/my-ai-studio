@@ -21,7 +21,7 @@ inferred from intent. Every status is one of:
 | --- | --- | --- |
 | ENVIRONMENT | PASS | node 24.21.0, git 2.47.3, docker 29.8.1, python 3.13.15, adb 1.0.41; java 17 present only in the backend image, no JDK and no system gradle on the host (the Gradle 8.9 wrapper is used) |
 | FRONTEND | PASS | typecheck, lint, 12/12 tests, production build 432.05 kB JS / 116.64 kB gzip across 4 lazy chunks + 9.88 kB CSS; the app is served over the public work-host URL and its API proxy works from a mobile user-agent |
-| BACKEND | PASS | typecheck, lint, 45/45 tests (incl. OpenRouter tests against a real local HTTP server), real HTTP smoke 15/15 |
+| BACKEND | PASS | typecheck, lint, 49/49 tests (incl. OpenRouter tests against a real local HTTP server), real HTTP smoke 15/15 |
 | DATABASE | PASS | PostgreSQL 16.15 reachable; migrations applied; auth and project rows persisted and read back |
 | OPENROUTER | PASS | live key used; HTTP 200 completion; `/api/health` reports `configured`; key never echoed |
 | AGENT LOOP | PASS | live run: reading -> editing -> testing -> building -> completed; code change and APK independently verified |
@@ -395,7 +395,8 @@ went from 42 to 45 passing.
 ```
 npm run typecheck   → exit 0 (backend + frontend)
 npm run lint        → exit 0 (backend + frontend)
-npm run test        → backend 45/45 pass, frontend 12/12 pass
+npm run test        → backend 49/49 pass, frontend 12/12 pass (the job-queue
+                      suite was added later and is mutation-checked)
 npm run build       → backend tsc clean; frontend built in 1.35s
 BASE=http://127.0.0.1:8080 bash scripts/smoke.sh → FAILURES: 0
 ```

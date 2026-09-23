@@ -17,7 +17,7 @@ on that machine's toolchain.
 | --- | --- | --- |
 | Backend typecheck | PASS | `npm run typecheck` clean |
 | Backend lint | PASS | `npm run lint` clean |
-| Backend tests | PASS | `npm test` - 45 tests, 45 pass |
+| Backend tests | PASS | `npm test` - 49 tests, 49 pass; the job-queue suite is mutation-checked (removing the timeout race turns it red) |
 | Backend build (`tsc`) | PASS | emits `backend/dist/server.js` |
 | Frontend typecheck | PASS | `tsc --noEmit` clean |
 | Frontend lint | PASS | `eslint` clean |

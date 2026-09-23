@@ -108,6 +108,26 @@ async function updateRun(runId: string, fields: Record<string, unknown>): Promis
   await query(`UPDATE agent_runs SET ${setClause} WHERE id = $1`, [runId, ...keys.map((k) => fields[k])]);
 }
 
+/**
+ * Writes a terminal status only if the row has not already reached one.
+ *
+ * When a run exceeds AGENT_TIMEOUT the queue rejects its promise and the route
+ * records a failure, but the abandoned run keeps executing its current
+ * `await`. If that orphan later reached the success branch it would rewrite the
+ * row as `succeeded` — a green result for a run that was reported as failed.
+ * Guarding on the current status makes the first terminal write win.
+ */
+async function finishRun(runId: string, fields: Record<string, unknown>): Promise<boolean> {
+  const keys = Object.keys(fields);
+  if (keys.length === 0) return false;
+  const setClause = keys.map((k, i) => `${k} = $${i + 2}`).join(', ');
+  const result = await query(
+    `UPDATE agent_runs SET ${setClause} WHERE id = $1 AND status IN ('queued', 'running')`,
+    [runId, ...keys.map((k) => fields[k])],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
 function extractJson(text: string): Record<string, unknown> | null {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
   const candidate = (fenced ? fenced[1] : text).trim();
@@ -326,23 +346,28 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunOutcom
     }
 
     if (buildOk && testOk) {
+      // A timeout aborts the signal mid-await; without this check the orphaned
+      // run would still report success for a run the user saw fail.
+      if (signal?.aborted) {
+        return { status: 'cancelled', summary: 'agent run cancelled', fixAttempts, finalPhase: 'failed' };
+      }
       onPhase('completed', 'COMPLETED');
-      await updateRun(agentRunId, {
+      const summaryText = summary || 'Agent run completed; build and tests passed.';
+      const recorded = await finishRun(agentRunId, {
         status: 'succeeded',
         phase: 'completed',
-        summary: summary || 'Agent run completed; build and tests passed.',
+        summary: summaryText,
         fix_attempts: fixAttempts,
         tokens_in: tokensIn,
         tokens_out: tokensOut,
         finished_at: new Date().toISOString(),
       });
+      if (!recorded) {
+        logger.warn('agent run already finished; not overwriting terminal status', { agentRunId });
+        return { status: 'failed', summary: 'agent run had already reached a terminal state', fixAttempts, finalPhase: 'failed' };
+      }
       agentEvent(projectId, 'completed', 'COMPLETED', { agentRunId });
-      return {
-        status: 'succeeded',
-        summary: summary || 'Agent run completed; build and tests passed.',
-        fixAttempts,
-        finalPhase: 'completed',
-      };
+      return { status: 'succeeded', summary: summaryText, fixAttempts, finalPhase: 'completed' };
     }
 
     if (attempt === maxFixAttempts) {

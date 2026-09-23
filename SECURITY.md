@@ -101,6 +101,27 @@ Authentication events, project creation/deletion, and every command, build and
 agent run are recorded in `audit_logs` with actor, action, target and timestamp.
 Logs never contain secret values.
 
+### Sandbox hardening
+
+Sandbox containers run as `uid 1000:1000` with `--cap-drop ALL`,
+`--security-opt no-new-privileges`, `--pids-limit`, memory and CPU caps, and a
+size-limited `/tmp` tmpfs. The project workspace is the only host path mounted.
+
+On a cloud host the instance-metadata endpoint (`169.254.169.254`) serves
+credentials to anything that can reach it, and the sandbox needs network access
+to run `gradlew` and package managers. `scripts/block-metadata.sh` inserts a
+`DOCKER-USER` DROP rule for that address and verifies from inside a container
+that it is unreachable. Run it on the host after installing Docker:
+
+```bash
+sudo bash scripts/block-metadata.sh docker0
+```
+
+Verified states in this environment: `cat /etc/shadow` returns
+`Permission denied`, `id` reports `uid=1000(sandbox)`, and the metadata endpoint
+returns `BLOCKED` from inside the sandbox. Gradle builds continue to succeed
+with these flags in place.
+
 ## Residual risks and honest limitations
 
 - **The host execution backend is not a sandbox.** It confines paths and strips

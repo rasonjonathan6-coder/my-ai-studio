@@ -251,6 +251,11 @@ export async function runCommand(options: RunOptions): Promise<RunResult> {
         '--cpus', config.sandbox.cpuLimit,
         '--pids-limit', String(config.sandbox.pidsLimit),
         '--user', '1000:1000',
+        // Drop Linux capabilities and forbid regaining them. The sandbox runs
+        // untrusted, model-authored commands, so it must not be able to
+        // reconfigure interfaces, load modules or otherwise escalate.
+        '--cap-drop', 'ALL',
+        '--security-opt', 'no-new-privileges',
         '--workdir', '/workspace',
         '--tmpfs', '/tmp:rw,exec,size=512m',
         '-v', `${options.cwd}:/workspace:rw`,

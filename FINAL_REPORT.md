@@ -20,7 +20,7 @@ inferred from intent. Every status is one of:
 | Area | Status | Evidence |
 | --- | --- | --- |
 | ENVIRONMENT | PASS | node 24.21.0, git 2.47.3, docker 29.8.1, python 3.13.15, adb 1.0.41; java 17 present only in the backend image, no JDK and no system gradle on the host (the Gradle 8.9 wrapper is used) |
-| FRONTEND | PASS | typecheck, lint, 12/12 tests, production build 195.97 kB JS / 59.59 kB gzip |
+| FRONTEND | PASS | typecheck, lint, 12/12 tests, production build 195.97 kB JS / 59.59 kB gzip; the app is served over the public work-host URL and its API proxy works from a mobile user-agent |
 | BACKEND | PASS | typecheck, lint, 45/45 tests (incl. OpenRouter tests against a real local HTTP server), real HTTP smoke 15/15 |
 | DATABASE | PASS | PostgreSQL 16.15 reachable; migrations applied; auth and project rows persisted and read back |
 | OPENROUTER | PASS | live key used; HTTP 200 completion; `/api/health` reports `configured`; key never echoed |
@@ -443,4 +443,10 @@ release            → rebuilt from HEAD 70a10d4; 25/25 checksums OK
 sandbox network    → cloud metadata 169.254.169.254 unreachable from inside
                      (curl exit 28, timeout); legitimate egress works
                      (https://api.github.com -> 200); runs as uid/gid 1000
+public URL path    → https://work-1-.../ serves the app (HTTP 200, title
+                     "My AI Studio") and proxies /api/health (200); register,
+                     project create (19 template files), terminal and file
+                     listing all succeed through it with a mobile user-agent
+terminal stability → 6/6 fresh projects returned the command output on the
+                     first call (exit 0, ~630ms)
 ```

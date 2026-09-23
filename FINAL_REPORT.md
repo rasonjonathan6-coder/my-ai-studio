@@ -21,7 +21,7 @@ inferred from intent. Every status is one of:
 | --- | --- | --- |
 | ENVIRONMENT | PASS | node 24.21.0, java 21 (host) / 17 (image), git 2.39.5, docker 29.8.1, gradle 8.9, adb 1.0.41, python 3.13.15 |
 | FRONTEND | PASS | typecheck, lint, 12/12 tests, production build 195.97 kB JS / 59.59 kB gzip |
-| BACKEND | PASS | typecheck, lint, 25/25 tests, real HTTP smoke 15/15 |
+| BACKEND | PASS | typecheck, lint, 39/39 tests (incl. 12 OpenRouter tests against a real local HTTP server), real HTTP smoke 15/15 |
 | DATABASE | PASS | PostgreSQL 16.15 reachable; migrations applied; auth and project rows persisted and read back |
 | OPENROUTER | NOT CONFIGURED | no `OPENROUTER_API_KEY`; integration implemented, `/api/health` reports `not_configured` |
 | OPENHANDS | NOT AVAILABLE | no OpenHands agent-server endpoint reachable from this environment |
@@ -29,11 +29,12 @@ inferred from intent. Every status is one of:
 | GITHUB ACTIONS | NOT TESTED | four workflows written; never dispatched on a runner |
 | ANDROID SDK | PASS (host) | build-tools 34.0.0, platform-tools, adb on the host |
 | ANDROID BUILD | PASS | `./gradlew test` and `./gradlew assembleDebug` ran for real |
-| APK | PASS | `app-debug.apk`, 3 191 119 bytes, SHA-256 `feb09ba7a3b33bab…` |
-| APK INSPECTION | PASS | fields read from the APK match `aapt2 dump badging` byte for byte |
-| APK SECURITY SCAN | PASS | archive unzipped and pattern-scanned; no secret patterns found |
+| APK | PASS | three templates each built a real `app-debug.apk`; release APK 3 191 115 bytes, SHA-256 `e6a99ba41f26cffdd179e478fa9d0d83c2923b086d68d30797766875a6bbd2ff` |
+| APK INSPECTION | PASS | real `aapt2` + `apksigner`: package/version/min-target read from the APK; signature verified as debug-signed with the v2 scheme |
+| APK SECURITY SCAN | PASS | archive unzipped and pattern-scanned; a planted key was detected and masked, and the clean templates report `clean` |
 | ANDROID EMULATOR | NOT AVAILABLE | no emulator, no `/dev/kvm`; `adb devices` is empty |
-| EXPORT | PASS | project ZIP produced with exclusions applied |
+| EXPORT | PASS | project ZIP produced with exclusions applied; a planted `.env` and `credentials.json` were both absent from the archive |
+| RELEASE ARTIFACTS | PASS | `release/` with source tarball, docs, deployment files and a real APK; 24 SHA-256 checksums verify |
 | PRODUCTION READINESS | PARTIAL | see the degraded-capability section below |
 
 ---

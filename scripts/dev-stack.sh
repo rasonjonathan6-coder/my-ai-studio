@@ -68,6 +68,17 @@ start_postgres() {
 
 start_backend() {
   $DOCKER rm -f "$API_CONTAINER" >/dev/null 2>&1
+  # Pass OpenRouter credentials only when .env provides them. The value is read
+  # into a shell variable and handed to docker without being echoed, so it never
+  # reaches the terminal, this script's output, or any log.
+  local or_args=()
+  if [ -f "$ROOT/.env" ]; then
+    local or_key or_model
+    or_key="$(sed -n 's/^OPENROUTER_API_KEY=//p' "$ROOT/.env" | head -1)"
+    or_model="$(sed -n 's/^OPENROUTER_MODEL=//p' "$ROOT/.env" | head -1)"
+    [ -n "$or_key" ] && or_args+=(-e "OPENROUTER_API_KEY=$or_key")
+    [ -n "$or_model" ] && or_args+=(-e "OPENROUTER_MODEL=$or_model")
+  fi
   $DOCKER run -d --name "$API_CONTAINER" -p 8080:8080 --link "$PG_CONTAINER":pg \
     --group-add "$(socket_gid)" \
     -e NODE_ENV=production \
@@ -79,6 +90,7 @@ start_backend() {
     -e SANDBOX_EXTRA_MOUNTS="$SDK_DIR:$SDK_DIR:ro,$GRADLE_CACHE:$GRADLE_CACHE" \
     -e ANDROID_HOME="$SDK_DIR" -e ANDROID_SDK_ROOT="$SDK_DIR" \
     -e GRADLE_USER_HOME="$GRADLE_CACHE" \
+    "${or_args[@]}" \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v /data/workspaces:/data/workspaces -v /data/storage:/data/storage \
     -v "$SDK_DIR:$SDK_DIR:ro" \

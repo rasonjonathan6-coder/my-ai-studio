@@ -44,28 +44,53 @@ export interface RunResult {
 }
 
 /**
- * Guardrail for the host backend. This is defence in depth only, not a
- * sandbox; the docker backend is the real isolation boundary.
+ * Patterns refused on every backend. The docker sandbox is the real isolation
+ * boundary, but it mounts the project at /workspace read-write, so a command
+ * that wipes /workspace destroys the project it is supposed to be building.
+ * These are the commands where the sandbox *is* the target.
  */
-const HOST_DENY_PATTERNS: Array<{ re: RegExp; reason: string }> = [
+const ALWAYS_DENY_PATTERNS: Array<{ re: RegExp; reason: string }> = [
   { re: /rm\s+(-[a-zA-Z]*\s+)*\/(\s|$)/, reason: 'refusing rm on /' },
-  { re: /rm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+(\/|~|\$HOME)(\s|$)/, reason: 'refusing recursive delete outside project' },
+  { re: /rm\s+(-[a-zA-Z]*\s+)*\/workspace\/?(\s|$)/, reason: 'refusing rm on the mounted project root' },
+  { re: /rm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+(\/|~|\$HOME)(\s|$)/, reason: 'refusing recursive delete outside the project subtree' },
   { re: /:\(\)\s*\{.*\}\s*;\s*:/, reason: 'fork bomb' },
   { re: /\bmkfs\b|\bdd\s+if=.*of=\/dev\//, reason: 'destructive disk operation' },
-  { re: /\/var\/run\/docker\.sock|\bdocker\s+(run|exec|[a-z]+)/, reason: 'docker socket / nested docker access' },
-  { re: /\bsudo\b|\bsu\s+-/, reason: 'privilege escalation' },
   { re: /\/etc\/(passwd|shadow|sudoers)/, reason: 'system credential access' },
-  { re: /\b(shutdown|reboot|halt|poweroff)\b/, reason: 'host power control' },
   { re: /(^|\s)(nc|ncat|telnet)\s+.*-e\s+/, reason: 'reverse shell' },
   { re: /curl[^|]*\|\s*(ba)?sh/, reason: 'pipe-to-shell download' },
   { re: /wget[^|]*\|\s*(ba)?sh/, reason: 'pipe-to-shell download' },
 ];
+
+/**
+ * Patterns refused only on the host backend, where the process can actually
+ * reach the daemon, the package manager or init. Inside the sandbox these are
+ * either impossible or harmless, so blocking them there would only break
+ * legitimate build steps.
+ */
+const HOST_ONLY_DENY_PATTERNS: Array<{ re: RegExp; reason: string }> = [
+  { re: /\/var\/run\/docker\.sock|\bdocker\s+(run|exec|[a-z]+)/, reason: 'docker socket / nested docker access' },
+  { re: /\bsudo\b|\bsu\s+-/, reason: 'privilege escalation' },
+  { re: /\b(shutdown|reboot|halt|poweroff)\b/, reason: 'host power control' },
+];
+
+const HOST_DENY_PATTERNS = [...ALWAYS_DENY_PATTERNS, ...HOST_ONLY_DENY_PATTERNS];
 
 export function hostDenyReason(command: string): string | null {
   for (const { re, reason } of HOST_DENY_PATTERNS) {
     if (re.test(command)) return reason;
   }
   return null;
+}
+
+export function sandboxDenyReason(command: string): string | null {
+  for (const { re, reason } of ALWAYS_DENY_PATTERNS) {
+    if (re.test(command)) return reason;
+  }
+  return null;
+}
+
+export function denyReasonFor(command: string, backend: ExecutionBackend): string | null {
+  return backend === 'host' ? hostDenyReason(command) : sandboxDenyReason(command);
 }
 
 function baseEnv(extra: Record<string, string> = {}): Record<string, string> {
@@ -214,13 +239,13 @@ export async function runCommand(options: RunOptions): Promise<RunResult> {
   const maxOutput = options.maxOutputBytes ?? config.maxOutputBytes;
   const started = Date.now();
 
-  if (options.enforceDenylist !== false && backend === 'host') {
-    const reason = hostDenyReason(options.command);
+  if (options.enforceDenylist !== false) {
+    const reason = denyReasonFor(options.command, backend);
     if (reason) {
       const durationMs = Date.now() - started;
       const stdout = '';
       const stderr = `BLOCKED BY POLICY: ${reason}\nCommand was not executed.\n`;
-      logger.warn('command blocked by host policy', { reason });
+      logger.warn('command blocked by policy', { reason, backend });
       options.onChunk?.('stderr', stderr);
       return {
         command: options.command,

@@ -2,7 +2,7 @@ name: build-apk
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
     paths:
       - 'android-samples/**'
       - '.github/workflows/build-apk.yml'
@@ -138,23 +138,33 @@ jobs:
       - name: Fail if the APK embeds secret material
         run: |
           set -e
+          # Without this check a missing `unzip` would make the loop below find
+          # nothing and report "clean" — a silent pass on a step whose whole job
+          # is to catch leaks.
+          command -v unzip > /dev/null || { echo "SECURITY FAILED: unzip is not available, cannot inspect the APK"; exit 1; }
           fail=0
+          scanned=0
           for apk in $(find android-samples -path '*/build/outputs/apk/debug/*.apk' -type f); do
             tmp=$(mktemp -d)
             unzip -qq "$apk" -d "$tmp"
+            scanned=$((scanned + 1))
             if grep -rIlE 'sk-or-[A-Za-z0-9]|OPENROUTER_API_KEY|api_key=|apikey=|password=|private_key|secret=' "$tmp" ; then
               echo "SECURITY FAILED: secret-like content found inside $apk"
               fail=1
             fi
             rm -rf "$tmp"
           done
+          if [ "$scanned" -eq 0 ]; then
+            echo "SECURITY FAILED: no APK was available to scan"
+            exit 1
+          fi
           if [ "$fail" -ne 0 ]; then exit 1; fi
-          echo "APK secret scan: clean"
+          echo "APK secret scan: clean ($scanned APK(s) inspected)"
 
       - name: Scan project sources for secrets
         run: |
           set -e
-          if grep -rInE 'sk-or-[A-Za-z0-9_-]{10,}|OPENROUTER_API_KEY[[:space:]]*=[[:space:]]*[^"'"'"'[:space:]]+' \
+          if grep -rInE 'sk-or-[A-Za-z0-9_-]{10,}|OPENROUTER_API_KEY[[:space:]]*=[[:space:]]*[^"$[:space:]]{8,}' \
               --exclude-dir=.git --exclude-dir=build --exclude-dir=.gradle android-samples ; then
             echo "SECURITY FAILED: secret-like value committed in sources"
             exit 1

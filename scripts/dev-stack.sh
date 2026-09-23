@@ -16,6 +16,38 @@ SANDBOX_IMAGE=my-ai-studio-sandbox:latest
 SDK_DIR=/opt/android-sdk
 GRADLE_CACHE=/opt/gradle-cache
 
+# Local development credentials. This script must not carry a working password
+# or JWT secret in a tracked file: a scanner (and any reader of the repository)
+# would treat them as real secrets, and anyone who copied the repo would share
+# them. Instead we generate random values on first run and keep them in a
+# gitignored file so containers keep the same values across restarts.
+DEV_CRED_FILE="$ROOT/.dev-credentials"
+
+load_dev_credentials() {
+  if [ -f "$DEV_CRED_FILE" ]; then
+    PG_PASSWORD="$(sed -n 's/^PG_PASSWORD=//p' "$DEV_CRED_FILE" | head -1)"
+    JWT_SECRET="$(sed -n 's/^JWT_SECRET=//p' "$DEV_CRED_FILE" | head -1)"
+  elif $DOCKER ps --format '{{.Names}}' | grep -qx "$PG_CONTAINER"; then
+    # The data volume already exists, so its password is authoritative. Adopting
+    # it keeps `up` idempotent; generating a fresh one here would leave the
+    # backend unable to authenticate against an unchanged database.
+    PG_PASSWORD="$($DOCKER inspect "$PG_CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+      | sed -n 's/^POSTGRES_PASSWORD=//p' | head -1)"
+    JWT_SECRET="$(openssl rand -hex 32 2>/dev/null || head -c 64 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    umask 077
+    printf 'PG_PASSWORD=%s\nJWT_SECRET=%s\n' "$PG_PASSWORD" "$JWT_SECRET" > "$DEV_CRED_FILE"
+    echo "adopted the existing postgres password; wrote .dev-credentials (gitignored)"
+  else
+    umask 077
+    {
+      printf 'PG_PASSWORD=%s\n' "$(openssl rand -hex 16 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+      printf 'JWT_SECRET=%s\n' "$(openssl rand -hex 32 2>/dev/null || head -c 64 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    } > "$DEV_CRED_FILE"
+    echo "generated local development credentials in .dev-credentials (gitignored)"
+  fi
+  [ -n "$PG_PASSWORD" ] && [ -n "$JWT_SECRET" ] || { echo "FAILED: local credentials are unavailable"; exit 1; }
+}
+
 socket_gid() { stat -c '%g' /var/run/docker.sock; }
 
 ensure_daemon() {
@@ -56,7 +88,7 @@ start_postgres() {
   if ! $DOCKER ps --format '{{.Names}}' | grep -qx "$PG_CONTAINER"; then
     $DOCKER rm -f "$PG_CONTAINER" >/dev/null 2>&1
     $DOCKER run -d --name "$PG_CONTAINER" \
-      -e POSTGRES_USER=studio -e POSTGRES_PASSWORD=studiopw -e POSTGRES_DB=myaistudio \
+      -e POSTGRES_USER=studio -e "POSTGRES_PASSWORD=$PG_PASSWORD" -e POSTGRES_DB=myaistudio \
       -v pgdata2:/var/lib/postgresql/data postgres:16-alpine >/dev/null || exit 1
   fi
   for _ in $(seq 1 30); do
@@ -82,8 +114,8 @@ start_backend() {
   $DOCKER run -d --name "$API_CONTAINER" -p 8080:8080 --link "$PG_CONTAINER":pg \
     --group-add "$(socket_gid)" \
     -e NODE_ENV=production \
-    -e JWT_SECRET=dev-only-secret-change-in-production-0123456789 \
-    -e DATABASE_URL=postgres://studio:studiopw@pg:5432/myaistudio \
+    -e "JWT_SECRET=$JWT_SECRET" \
+    -e "DATABASE_URL=postgres://studio:$PG_PASSWORD@pg:5432/myaistudio" \
     -e CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173 \
     -e WORKSPACE_PATH=/data/workspaces -e STORAGE_PATH=/data/storage \
     -e SANDBOX_ENABLED=true -e SANDBOX_IMAGE="$SANDBOX_IMAGE" \
@@ -106,6 +138,7 @@ start_backend() {
 case "${1:-up}" in
   up)
     ensure_daemon
+    load_dev_credentials
     ensure_build_dirs
     ensure_sandbox_image
     ensure_backend_image

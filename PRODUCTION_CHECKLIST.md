@@ -31,8 +31,8 @@ on that machine's toolchain.
 | --- | --- | --- |
 | Database migrations | PASS | 13 tables created; asserted by querying `information_schema` |
 | Authentication (register/login/logout/me) | PASS | exercised by `scripts/smoke.sh` |
-| Project authorization | PASS | cross-user access returns 403; smoke asserts it |
-| Unauthenticated access denied | PASS | smoke asserts 401/403 |
+| Project authorization | PASS | a second account gets 404 for another user's project, on both project metadata and every download route; the 404 is deliberate so ids cannot be probed (an audit row is still written) |
+| Unauthenticated access denied | PASS | unauthenticated `GET /api/projects/:id/download/apk` returns 401; smoke asserts it |
 | Path traversal blocked | PASS | unit tests plus a live request in the smoke suite |
 | Real terminal execution | PASS | stdout/stderr/exit code/duration returned |
 | Destructive-command policy | PASS | `rm -rf /` and `rm -rf /workspace` both return exit 126 with `BLOCKED BY POLICY` on the docker backend; the project keeps its files and `./gradlew --version` still runs |
@@ -65,8 +65,8 @@ on that machine's toolchain.
 | --- | --- | --- |
 | Docker Compose stack | PASS | builds and starts; verified with a real container |
 | Sandbox image | PASS | built and ran isolation checks |
-| Secret scan in CI | PASS | workflow greps tree, bundle and APK |
-| GitHub Actions workflows | NOT TESTED | valid YAML; not executed in this environment |
+| Secret scan in CI | PASS | the workflow's own scan steps were executed here against this tree; they now pass, and were checked to still catch planted literal secrets while ignoring `$VAR` references |
+| GitHub Actions workflows | NOT TESTED | valid YAML, correct `master` trigger and locally executed scan steps; still never dispatched on a real runner |
 | Oracle Cloud deployment | NOT TESTED | no Oracle access; see `ORACLE_SETUP.md` |
 | Cloudflare Pages deployment | NOT TESTED | no Cloudflare access; see `CLOUDFLARE_SETUP.md` |
 | Supabase connection | NOT TESTED | no Supabase project; uses local PostgreSQL |
@@ -77,7 +77,9 @@ on that machine's toolchain.
 
 Before exposing this to anyone else, all of the following must be true:
 
-- [ ] `JWT_SECRET` is a real 32+ character random value, not the dev placeholder
+- [ ] `JWT_SECRET` is a real 32+ character random value. The helper script now
+      generates one into a gitignored `.dev-credentials`, so no placeholder is
+      committed; production must supply its own via the environment.
 - [ ] `DATABASE_URL` points at a real database with TLS (`sslmode=require`)
 - [ ] `CORS_ORIGINS` lists your exact frontend origin, not `*`
 - [ ] `SESSION_COOKIE_SAMESITE` matches your topology (`none` if cross-site)

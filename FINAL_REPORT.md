@@ -20,7 +20,7 @@ inferred from intent. Every status is one of:
 | Area | Status | Evidence |
 | --- | --- | --- |
 | ENVIRONMENT | PASS | node 24.21.0, git 2.47.3, docker 29.8.1, python 3.13.15, adb 1.0.41; java 17 present only in the backend image, no JDK and no system gradle on the host (the Gradle 8.9 wrapper is used) |
-| FRONTEND | PASS | typecheck, lint, 12/12 tests, production build 195.97 kB JS / 59.59 kB gzip; the app is served over the public work-host URL and its API proxy works from a mobile user-agent |
+| FRONTEND | PASS | typecheck, lint, 12/12 tests, production build 432.05 kB JS / 116.64 kB gzip across 4 lazy chunks + 9.88 kB CSS; the app is served over the public work-host URL and its API proxy works from a mobile user-agent |
 | BACKEND | PASS | typecheck, lint, 45/45 tests (incl. OpenRouter tests against a real local HTTP server), real HTTP smoke 15/15 |
 | DATABASE | PASS | PostgreSQL 16.15 reachable; migrations applied; auth and project rows persisted and read back |
 | OPENROUTER | PASS | live key used; HTTP 200 completion; `/api/health` reports `configured`; key never echoed |

@@ -2,7 +2,7 @@ name: security
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
   schedule:
     - cron: '17 4 * * 1'
@@ -24,7 +24,7 @@ jobs:
       - name: Fail on secret-looking values in the working tree
         run: |
           set -e
-          patterns='sk-or-[A-Za-z0-9_-]{10,}|OPENROUTER_API_KEY[[:space:]]*=[[:space:]]*[^"[:space:]]{8,}|DATABASE_URL[[:space:]]*=[[:space:]]*postgres://[^"[:space:]]*:[^"[:space:]]*@|JWT_SECRET[[:space:]]*=[[:space:]]*[^"[:space:]]{8,}|BEGIN (RSA|OPENSSH|PRIVATE) KEY|private_key[[:space:]]*=[[:space:]]*[^"[:space:]]{8,}'
+          patterns='sk-or-[A-Za-z0-9_-]{10,}|OPENROUTER_API_KEY[[:space:]]*=[[:space:]]*[^"$[:space:]]{8,}|DATABASE_URL[[:space:]]*=[[:space:]]*postgres://[^"$[:space:]]+:[^"$[:space:]]+@|JWT_SECRET[[:space:]]*=[[:space:]]*[^"$[:space:]]{8,}|BEGIN (RSA|OPENSSH|PRIVATE) KEY|private_key[[:space:]]*=[[:space:]]*[^"[:space:]]{8,}'
           if git grep -InE "$patterns" -- . ':!*.example' ':!*.md' ':!.github/workflows/*' ':!backend/test/**' ':!backend/tests/**' ':!frontend/src/**/*.test.ts' ; then
             echo "SECURITY FAILED: secret-like value present in tracked files"
             exit 1

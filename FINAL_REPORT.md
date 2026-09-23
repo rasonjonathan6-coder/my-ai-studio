@@ -451,3 +451,69 @@ public URL path    → https://work-1-.../ serves the app (HTTP 200, title
 terminal stability → 6/6 fresh projects returned the command output on the
                      first call (exit 0, ~630ms)
 ```
+
+## ADDENDUM — 2026-09-23 (later): CI workflows exercised locally, three real defects fixed
+
+No new features were added. The existing automation was executed instead of
+being trusted, which surfaced three concrete problems.
+
+### The CI security scan was failing on this repository
+
+Running `.github/workflows/security.yml`'s own `git grep` here reported:
+
+```
+scripts/dev-stack.sh:85: JWT_SECRET=dev-only-secret-change-in-production-0123456789
+scripts/dev-stack.sh:86: DATABASE_URL=postgres://studio:studiopw@pg:5432/myaistudio
+SECURITY FAILED
+```
+
+The scan was right and the script was wrong: a working password and JWT secret
+were committed in a tracked file. `scripts/dev-stack.sh` now generates random
+credentials into a gitignored `.dev-credentials`, and - because the Postgres
+volume already exists on a running host - adopts the live container's password
+instead of minting a new one, so `up` stays idempotent. Verified after the
+change: the file is mode 600, `git check-ignore` matches it, and a pre-existing
+account still logs in (HTTP 200).
+
+The scan's patterns also matched bare shell variable references such as
+`-e "JWT_SECRET=$JWT_SECRET"`, so it would have failed on any correct new code.
+The value classes now exclude `$`. Checked both ways in a sandbox: four planted
+literal secrets are still caught, four variable references are ignored.
+
+### The APK secret scan could pass without inspecting anything
+
+`.github/workflows/build-apk.yml` unzipped the APK and reported "clean". This
+environment has no `unzip` on the host, so the step silently did nothing and
+printed success. It now fails closed: it refuses to run without `unzip`, and
+refuses to report clean when it scanned zero APKs.
+
+### An orphaned agent run could overwrite a timeout failure with success
+
+A run exceeding `AGENT_TIMEOUT` is rejected by the job queue and the route
+records `status='failed'`. The abandoned run kept running its in-flight build,
+then fell through to the success branch and rewrote the same row as
+`succeeded` - a green result for work reported as failed. The success path now
+checks the abort signal and writes through `finishRun`, which only applies while
+the row is still `queued` or `running`. Confirmed against real PostgreSQL: after
+a `failed` write, the guarded success update affects 0 rows.
+
+### Test count
+
+`backend/tests/jobQueue.test.ts` was added because the queue is what prevents a
+wedged job from holding a slot forever, and it had no test. 49/49 backend,
+12/12 frontend. The suite was mutation-checked: deleting the timeout race turns
+it red (`fail 1`), and restoring the file returns it to green.
+
+```
+npm run typecheck   -> exit 0 (backend + frontend)
+npm run lint        -> exit 0 (backend + frontend)
+npm test            -> backend 49/49, frontend 12/12
+npm run build       -> clean
+scripts/smoke.sh    -> FAILURES: 0, against the rebuilt container
+```
+
+### What this does not claim
+
+The workflows were parsed as YAML and their shell steps were run here. They have
+still never executed on a GitHub runner, and Oracle and Cloudflare are still not
+deployed. GITHUB ACTIONS remains NOT TESTED; see the checklist.

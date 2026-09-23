@@ -91,3 +91,13 @@ procedure in `docs/AGENT_LOOP_TESTING.md`.
 The most valuable assertion in this repository is the negative one: a build that
 fails must report `status: failed` with `apk: null`. A regression once let a
 failed build re-attach the previous build's APK.
+
+## Terminal statuses are write-once
+
+An agent run that exceeds `AGENT_TIMEOUT` is rejected by the job queue while
+the abandoned run keeps executing its in-flight `await`. It must not be able
+to rewrite its own row afterwards, or a run the user saw time out can turn
+green later. The success path therefore checks the abort signal and uses
+`finishRun`, which only applies when the row is still `queued` or `running`.
+Any new terminal write should go through `finishRun` for the same reason.
+

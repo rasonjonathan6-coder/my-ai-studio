@@ -1,0 +1,81 @@
+# Local development stack: PostgreSQL plus the backend API.
+#
+#   docker compose up --build
+#
+# The frontend is not containerised here; run `npm run dev` in frontend/ and it
+# proxies /api and /ws to port 8080. For a production topology see DEPLOYMENT.md.
+#
+# Note on the sandbox: the backend can run commands inside Docker, which means it
+# needs access to a Docker socket. That socket is a privilege-escalation path, so
+# it is commented out below and only enabled in a trusted, single-tenant setup.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-myaistudio}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-myaistudio}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-myaistudio} -d ${POSTGRES_DB:-myaistudio}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Not published to the host by default: only the backend needs to reach it.
+    expose:
+      - '5432'
+
+  backend:
+    build:
+      # Context is the repository root: this is an npm workspace with a single
+      # root lockfile, and backend/ has no lockfile of its own.
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        INSTALL_ANDROID_TOOLCHAIN: ${INSTALL_ANDROID_TOOLCHAIN:-0}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - path: ./.env
+        required: false
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: '8080'
+      DATABASE_URL: postgres://${POSTGRES_USER:-myaistudio}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-myaistudio}
+      WORKSPACE_PATH: /data/workspaces
+      STORAGE_PATH: /data/storage
+      SANDBOX_ENABLED: ${SANDBOX_ENABLED:-false}
+    ports:
+      - '${BACKEND_PORT:-8080}:8080'
+    volumes:
+      - workspaces:/data/workspaces
+      - storage:/data/storage
+      # Optional: expose a host Android SDK so APK inspection can use the real
+      # aapt2/apksigner instead of the built-in AXML parser. Set ANDROID_SDK_DIR
+      # to the SDK path on the host. Read-only: the backend never writes to it.
+      - ${ANDROID_SDK_DIR:-/nonexistent}:/opt/android-sdk:ro
+    # Uncomment only if you deliberately want in-container command sandboxing on
+    # a trusted host. Mounting the Docker socket grants effective root.
+    # volumes:
+    #   - /var/run/docker.sock:/var/run/docker.sock
+
+  # Optional: build the command-sandbox image used by SANDBOX_ENABLED=true.
+  # It carries no project data; the backend bind-mounts one workspace per run.
+  #   docker compose --profile sandbox build sandbox
+  sandbox:
+    profiles: ['sandbox']
+    build:
+      context: ./sandbox
+    image: my-ai-studio-sandbox:latest
+    # Never started as a service; it is an image for `docker run`.
+    command: ['true']
+
+volumes:
+  pgdata:
+  workspaces:
+  storage:

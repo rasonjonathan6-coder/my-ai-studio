@@ -1,0 +1,77 @@
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: Secret scan (working tree and history)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fail on secret-looking values in the working tree
+        run: |
+          set -e
+          patterns='sk-or-[A-Za-z0-9_-]{10,}|OPENROUTER_API_KEY[[:space:]]*=[[:space:]]*[^"[:space:]]{8,}|DATABASE_URL[[:space:]]*=[[:space:]]*postgres://[^"[:space:]]*:[^"[:space:]]*@|JWT_SECRET[[:space:]]*=[[:space:]]*[^"[:space:]]{8,}|BEGIN (RSA|OPENSSH|PRIVATE) KEY|private_key[[:space:]]*=[[:space:]]*[^"[:space:]]{8,}'
+          if git grep -InE "$patterns" -- . ':!*.example' ':!*.md' ':!.github/workflows/*' ':!backend/test/**' ':!backend/tests/**' ':!frontend/src/**/*.test.ts' ; then
+            echo "SECURITY FAILED: secret-like value present in tracked files"
+            exit 1
+          fi
+          echo "working tree scan: clean"
+
+      - name: Fail on a committed .env file
+        run: |
+          set -e
+          if git ls-files | grep -E '(^|/)\.env$|(^|/)\.env\.[a-z]+$' | grep -v '\.example$' ; then
+            echo "SECURITY FAILED: an environment file is tracked by git"
+            exit 1
+          fi
+          echo "no tracked env files"
+
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Audit backend production dependencies
+        working-directory: backend
+        run: npm audit --audit-level=high --omit=dev
+      - name: Audit frontend production dependencies
+        working-directory: frontend
+        run: npm audit --audit-level=high --omit=dev
+
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - uses: github/codeql-action/analyze@v3

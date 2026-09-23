@@ -1,0 +1,4 @@
+# SPA fallback: let the client router handle deep links like /projects/:id.
+# The API and WebSocket live on the backend origin (VITE_API_URL), so nothing
+# under /api or /ws ever reaches this host.
+/*    /index.html   200

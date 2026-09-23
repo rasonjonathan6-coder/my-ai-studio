@@ -1,0 +1,99 @@
+# Production checklist
+
+Mark each item with one of four values, and mean it:
+
+- **PASS** - actually executed and verified here, with the command or artifact shown
+- **FAIL** - executed and it went wrong
+- **NOT AVAILABLE** - the capability does not exist in this environment
+- **NOT TESTED** - possible, but nobody has run it yet
+
+Never write PASS because it should work. The states below reflect what was run
+while building this repository; re-verify on your own machine, since they depend
+on that machine's toolchain.
+
+## Build
+
+| Item | State | Evidence |
+| --- | --- | --- |
+| Backend typecheck | PASS | `npm run typecheck` clean |
+| Backend lint | PASS | `npm run lint` clean |
+| Backend tests | PASS | `npm test` - 19 tests, 19 pass |
+| Backend build (`tsc`) | PASS | emits `backend/dist/server.js` |
+| Frontend typecheck | PASS | `tsc --noEmit` clean |
+| Frontend lint | PASS | `eslint` clean |
+| Frontend tests | PASS | `vitest run` - 12 tests, 12 pass |
+| Frontend production build | PASS | `vite build` emits `frontend/dist` |
+| Bundle contains no secrets | PASS | grep of `dist/` for key patterns is empty |
+
+## Runtime
+
+| Item | State | Evidence |
+| --- | --- | --- |
+| Database migrations | PASS | 13 tables created; asserted by querying `information_schema` |
+| Authentication (register/login/logout/me) | PASS | exercised by `scripts/smoke.sh` |
+| Project authorization | PASS | cross-user access returns 403; smoke asserts it |
+| Unauthenticated access denied | PASS | smoke asserts 401/403 |
+| Path traversal blocked | PASS | unit tests plus a live request in the smoke suite |
+| Real terminal execution | PASS | stdout/stderr/exit code/duration returned |
+| WebSocket event stream | PASS | agent and build events delivered to the client |
+| Rate limiting | PASS | limiter middleware active on API, auth, terminal, agent, build |
+| Graceful shutdown | PASS | SIGTERM/SIGINT close server, sockets and pool |
+| Health endpoint | PASS | `GET /api/health` returns `{"ok":true,...}` |
+| System status probes | PASS | `GET /api/system/status` reports each component |
+| OpenRouter integration | NOT CONFIGURED | no API key here; `/api/health` reports `not_configured` |
+| Docker sandbox | PASS | commands ran in the sandbox image as uid 1000 with no socket |
+
+## Android
+
+| Item | State | Evidence |
+| --- | --- | --- |
+| Android SDK present | PASS | `aapt2`/`apksigner` from `build-tools;34.0.0` |
+| Gradle unit tests | PASS | Gradle 8.9, real JUnit XML parsed, non-zero pass count |
+| `assembleDebug` | PASS | APK produced on disk |
+| APK exists and is valid | PASS | `aapt2 dump badging` on the file |
+| APK inspection | PASS | package/version/minSdk/targetSdk/components read from the built APK; values match `aapt2 dump badging` |
+| APK secret scan | PASS | unzipped and grepped; clean |
+| Emulator preview | NOT AVAILABLE | no emulator, no KVM; endpoint reports `ANDROID PREVIEW: NOT AVAILABLE` |
+| CI APK workflow | NOT TESTED | `.github/workflows/build-apk.yml` is written but has not run here |
+
+## Operations
+
+| Item | State | Evidence |
+| --- | --- | --- |
+| Docker Compose stack | PASS | builds and starts; verified with a real container |
+| Sandbox image | PASS | built and ran isolation checks |
+| Secret scan in CI | PASS | workflow greps tree, bundle and APK |
+| GitHub Actions workflows | NOT TESTED | valid YAML; not executed in this environment |
+| Oracle Cloud deployment | NOT TESTED | no Oracle access; see `ORACLE_SETUP.md` |
+| Cloudflare Pages deployment | NOT TESTED | no Cloudflare access; see `CLOUDFLARE_SETUP.md` |
+| Supabase connection | NOT TESTED | no Supabase project; uses local PostgreSQL |
+| Backup job | NOT CONFIGURED | procedure documented, no scheduler installed |
+| Monitoring / alerting | NOT CONFIGURED | logs only, no external monitor |
+
+## Go-live gate
+
+Before exposing this to anyone else, all of the following must be true:
+
+- [ ] `JWT_SECRET` is a real 32+ character random value, not the dev placeholder
+- [ ] `DATABASE_URL` points at a real database with TLS (`sslmode=require`)
+- [ ] `CORS_ORIGINS` lists your exact frontend origin, not `*`
+- [ ] `SESSION_COOKIE_SAMESITE` matches your topology (`none` if cross-site)
+- [ ] HTTPS terminates in front of the API
+- [ ] The API port and PostgreSQL are unreachable from the internet
+- [ ] `SANDBOX_ENABLED=true`, and you accept that this means mounting the Docker socket
+- [ ] `/data/workspaces` and `/data/storage` are writable by uid 1000
+- [ ] A backup job has been installed *and a restore has been tested*
+- [ ] `bash scripts/smoke.sh` passes against the deployment
+
+The restore test is the one people skip. A backup you have never restored is a
+guess.
+
+## What is deliberately not production-ready
+
+- The host command backend (`SANDBOX_ENABLED=false`) runs commands as the
+  service user with a denylist. It is a development fallback, not a security
+  boundary. Use the sandbox in production.
+- The Android preview returns "not available" rather than a fake screen. Wiring
+  a real emulator host is future work, not a hidden gap.
+- There is no multi-tenant resource accounting: `MAX_CONCURRENT_JOBS` caps total
+  parallelism, not per-user usage.

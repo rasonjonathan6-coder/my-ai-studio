@@ -19,9 +19,9 @@ inferred from intent. Every status is one of:
 
 | Area | Status | Evidence |
 | --- | --- | --- |
-| ENVIRONMENT | PASS | node 24.21.0, java 21 (host) / 17 (image), git 2.39.5, docker 29.8.1, gradle 8.9, adb 1.0.41, python 3.13.15 |
+| ENVIRONMENT | PASS | node 24.21.0, git 2.47.3, docker 29.8.1, python 3.13.15, adb 1.0.41; java 17 present only in the backend image, no JDK and no system gradle on the host (the Gradle 8.9 wrapper is used) |
 | FRONTEND | PASS | typecheck, lint, 12/12 tests, production build 195.97 kB JS / 59.59 kB gzip |
-| BACKEND | PASS | typecheck, lint, 39/39 tests (incl. 12 OpenRouter tests against a real local HTTP server), real HTTP smoke 15/15 |
+| BACKEND | PASS | typecheck, lint, 45/45 tests (incl. OpenRouter tests against a real local HTTP server), real HTTP smoke 15/15 |
 | DATABASE | PASS | PostgreSQL 16.15 reachable; migrations applied; auth and project rows persisted and read back |
 | OPENROUTER | PASS | live key used; HTTP 200 completion; `/api/health` reports `configured`; key never echoed |
 | AGENT LOOP | PASS | live run: reading -> editing -> testing -> building -> completed; code change and APK independently verified |
@@ -35,7 +35,7 @@ inferred from intent. Every status is one of:
 | APK SECURITY SCAN | PASS | archive unzipped and pattern-scanned; a planted key was detected and masked, and the clean templates report `clean` |
 | ANDROID EMULATOR | NOT AVAILABLE | no emulator, no `/dev/kvm`; `adb devices` is empty |
 | EXPORT | PASS | project ZIP produced with exclusions applied; a planted `.env` and `credentials.json` were both absent from the archive |
-| RELEASE ARTIFACTS | PASS | `release/` with source tarball, docs, deployment files and a real APK; 24 SHA-256 checksums verify |
+| RELEASE ARTIFACTS | PASS | `release/` rebuilt from HEAD `70a10d4` with `git archive`, docs, deployment files and a real APK; all 25 SHA-256 checksums verify |
 | PRODUCTION READINESS | PARTIAL | see the degraded-capability section below |
 
 ---
@@ -398,4 +398,46 @@ npm run lint        → exit 0 (backend + frontend)
 npm run test        → backend 45/45 pass, frontend 12/12 pass
 npm run build       → backend tsc clean; frontend built in 1.35s
 BASE=http://127.0.0.1:8080 bash scripts/smoke.sh → FAILURES: 0
+```
+
+### End-to-end artifact re-verification
+
+A second project was created through the API and taken through the full path a
+user would follow. Every number below was read from the live system, not copied
+from an earlier run.
+
+```
+project            82f12657-b21c-4b0c-bfbf-0929900fbce3 (android-hello)
+POST .../build     → exit_code 0, status succeeded
+APK on disk        3 189 843 bytes, sha256 c8fa61b9…2396
+GET  .../download/apk
+                   → HTTP 200, 3 189 843 bytes, content-type
+                     application/vnd.android.package-archive, magic bytes "PK"
+                   → sha256 of the download equals the sha256 of the build
+GET  .../download/zip
+                   → HTTP 200, 50 416 bytes, 33 entries, no .env / secret /
+                     credential / key / node_modules / .git entry
+GET  .../download/logs
+                   → HTTP 200, 2 617 bytes of real Gradle output
+POST .../inspect-apk
+                   → package com.myaistudio.hello, versionName 1.0,
+                     versionCode 1, minSdk 24, targetSdk 34, MainActivity,
+                     signed true, tools aapt2/unzip/axml/apksigner
+POST .../security/scan
+                   → status clean, 9 files scanned, APK scanned
+                     (178 text-like entries of 422), findings []
+cross-user APK GET → HTTP 404 (existence hidden, not just forbidden)
+unauthenticated    → HTTP 401
+```
+
+Behavioural checks on the live deployment:
+
+```
+rate limiting      → 30 requests accepted, request 31 onwards HTTP 429;
+                     /api/health still 200 after the burst
+graceful shutdown  → docker kill --signal=TERM mas-api logs
+                     "shutting down" then "shutdown complete", container exits 0
+destructive policy → "rm -rf /workspace" and "rm -rf /" both exit 126 with
+                     "BLOCKED BY POLICY"; "./gradlew --version" still exit 0
+release            → rebuilt from HEAD 70a10d4; 25/25 checksums OK
 ```

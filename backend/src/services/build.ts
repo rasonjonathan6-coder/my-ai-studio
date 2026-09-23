@@ -166,6 +166,7 @@ export async function runBuild(input: {
 
   logEvent(input.projectId, 'build_log', 'info', `building (${detection.kind}): ${detection.command}`);
 
+  const buildStartedAt = Date.now();
   const result = await runCommand({
     cwd: root,
     command: detection.command,
@@ -191,23 +192,35 @@ export async function runBuild(input: {
         error = 'gradle reported success but no APK was found under app/build/outputs/apk';
         logEvent(input.projectId, 'build_log', 'error', `BUILD FAILED: ${error}`);
       }
-    } else {
+    } else if (status === 'succeeded') {
       const stat = await fs.stat(apkPath);
-      const digest = await sha256File(apkPath);
-      const relPath = path.relative(root, apkPath).split(path.sep).join('/');
-      apkInfo = { path: apkPath, relPath, sizeBytes: stat.size, sha256: digest };
-      logEvent(input.projectId, 'build_log', 'info', `APK FOUND: ${relPath} (${stat.size} bytes, sha256 ${digest.slice(0, 16)}...)`);
+      // A failed compile leaves the previous run's APK on disk. Only accept an
+      // artifact this build actually produced, otherwise a stale APK would be
+      // reported as the output of a build that never wrote one.
+      if (stat.mtimeMs < buildStartedAt) {
+        status = 'failed';
+        error = 'build reported success but the APK on disk predates this build; refusing to report a stale artifact';
+        logEvent(input.projectId, 'build_log', 'error', `BUILD FAILED: ${error}`);
+      } else {
+        const digest = await sha256File(apkPath);
+        const relPath = path.relative(root, apkPath).split(path.sep).join('/');
+        apkInfo = { path: apkPath, relPath, sizeBytes: stat.size, sha256: digest };
+        logEvent(input.projectId, 'build_log', 'info', `APK FOUND: ${relPath} (${stat.size} bytes, sha256 ${digest.slice(0, 16)}...)`);
 
-      logEvent(input.projectId, 'build_log', 'info', 'INSPECTING APK', { phase: 'inspecting' });
-      inspection = await inspectApk(apkPath);
-      logEvent(input.projectId, 'build_log', 'info', `APK inspection complete (tools: ${inspection.toolsUsed.join(', ') || 'none'})`);
+        logEvent(input.projectId, 'build_log', 'info', 'INSPECTING APK', { phase: 'inspecting' });
+        inspection = await inspectApk(apkPath);
+        logEvent(input.projectId, 'build_log', 'info', `APK inspection complete (tools: ${inspection.toolsUsed.join(', ') || 'none'})`);
 
-      await query(
-        `INSERT INTO artifacts (project_id, build_id, owner_id, kind, rel_path, size_bytes, sha256)
-         VALUES ($1, $2, $3, 'apk', $4, $5, $6)`,
-        [input.projectId, buildId, input.ownerId, relPath, stat.size, digest],
-      );
-      logger.info('apk produced', { projectId: input.projectId, relPath, sizeBytes: stat.size });
+        await query(
+          `INSERT INTO artifacts (project_id, build_id, owner_id, kind, rel_path, size_bytes, sha256)
+           VALUES ($1, $2, $3, 'apk', $4, $5, $6)`,
+          [input.projectId, buildId, input.ownerId, relPath, stat.size, digest],
+        );
+        logger.info('apk produced', { projectId: input.projectId, relPath, sizeBytes: stat.size });
+      }
+    } else {
+      // Build failed: report the failure plainly, without claiming any artifact.
+      logEvent(input.projectId, 'build_log', 'error', `BUILD FAILED: ${error ?? 'gradle exited with a non-zero code'}`);
     }
   }
 

@@ -72,6 +72,35 @@ curl -s -X POST -H 'Content-Type: application/json' \
 If this fails the problem is the key, the model id, or account credit - not the
 application.
 
+## Free-tier daily quota
+
+`openrouter/free` is capped per day, not per minute. Once the cap is hit the API
+returns HTTP 429 with a body containing `free-models-per-day` and headers
+`X-RateLimit-Limit: 50`, `X-RateLimit-Remaining: 0`, plus `X-RateLimit-Reset`
+(a Unix epoch **milliseconds** value, typically the next midnight UTC).
+
+The client distinguishes two 429 cases:
+
+- transient throttle (no daily marker): retried with exponential backoff, or the
+  provider's `Retry-After` if it sent one;
+- exhausted daily quota (daily marker present): **not** retried inside the run.
+  The run fails with `rate_limited: daily free-model quota exhausted; resets at
+  <ISO timestamp>` so the reset time is visible instead of burning attempts.
+
+To keep working past 50 requests/day, either add credits to the OpenRouter
+account or point `OPENROUTER_MODEL` at another model. Raising
+`OPENROUTER_MAX_RETRIES` will not help a daily quota.
+
+## Testing the agent loop without spending quota
+
+`scripts/scripted-model.mjs` is a small HTTP server that speaks the chat
+completions response shape and replays a fixed tool sequence (read a file, edit
+it, rebuild). Start it on a throwaway docker network and point a second backend
+instance at it with `OPENROUTER_BASE_URL`. Only the model transport is stand-in
+code: every tool it triggers - file edits, `./gradlew assembleDebug`, APK
+inspection - runs for real. This is how the loop is verified when the daily
+quota is exhausted.
+
 ## Keeping the key out of artifacts
 
 Three independent controls enforce this:

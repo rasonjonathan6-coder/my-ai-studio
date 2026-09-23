@@ -70,6 +70,7 @@ When you are finished with the whole request, reply with ONLY:
 {"done":true,"summary":"<what you changed and the verified result>"}
 
 Rules:
+- All paths are relative to the project root (for example "app/src/main/java/com/example/MainActivity.kt"). Never use absolute paths.
 - Prefer edit_file over create_file when a file already exists.
 - You may call at most one tool per reply.
 - Always verify your work: after editing, run the project's tests or a build.
@@ -199,16 +200,27 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunOutcom
   let tokensOut = 0;
 
   const callModel = async (): Promise<{ ok: boolean; text: string; error?: string }> => {
-    const result = await openRouter.chat({
-      messages: messages.slice(-MAX_HISTORY_MESSAGES),
-      signal,
-    });
-    if (!result.ok) {
-      return { ok: false, text: '', error: `${result.kind}: ${result.message}` };
+    // Free-tier models are rate limited aggressively. A 429 is transient, so
+    // wait out the provider's Retry-After before giving up on the step instead
+    // of failing the whole run on the first throttle.
+    for (let waitRound = 0; waitRound < 4; waitRound += 1) {
+      const result = await openRouter.chat({
+        messages: messages.slice(-MAX_HISTORY_MESSAGES),
+        signal,
+      });
+      if (result.ok) {
+        tokensIn += result.usage.promptTokens;
+        tokensOut += result.usage.completionTokens;
+        return { ok: true, text: result.content };
+      }
+      if (result.kind !== 'rate_limited' || waitRound === 3 || signal?.aborted) {
+        return { ok: false, text: '', error: `${result.kind}: ${result.message}` };
+      }
+      const pauseMs = result.retryAfterMs ?? 15000;
+      logEvent(projectId, 'build_log', 'warn', `model rate limited, waiting ${pauseMs}ms before retrying the step`);
+      await new Promise((resolve) => setTimeout(resolve, pauseMs));
     }
-    tokensIn += result.usage.promptTokens;
-    tokensOut += result.usage.completionTokens;
-    return { ok: true, text: result.content };
+    return { ok: false, text: '', error: 'rate_limited: exhausted step-level retries' };
   };
 
   for (let attempt = 0; attempt <= maxFixAttempts; attempt += 1) {

@@ -117,6 +117,14 @@ Two distinct causes:
    that are valid for the Docker daemon, not paths that are only valid inside
    the backend container. This is the single most common sandbox failure.
 
+### The agent run fails with `rate_limited: daily free-model quota exhausted`
+
+Not a bug. `openrouter/free` allows a fixed number of requests per day and the
+allowance is spent. The message includes the reset timestamp from OpenRouter's
+`X-RateLimit-Reset` header. The client deliberately does not retry a daily quota
+inside the run, because retrying cannot succeed before the reset. Wait for the
+reset, add credits, or change `OPENROUTER_MODEL`. See `OPENROUTER_SETUP.md`.
+
 ### The agent replies `not_configured`
 
 `OPENROUTER_API_KEY` is unset. This is reported honestly rather than faked. Set

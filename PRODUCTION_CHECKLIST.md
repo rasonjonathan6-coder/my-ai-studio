@@ -17,7 +17,7 @@ on that machine's toolchain.
 | --- | --- | --- |
 | Backend typecheck | PASS | `npm run typecheck` clean |
 | Backend lint | PASS | `npm run lint` clean |
-| Backend tests | PASS | `npm test` - 19 tests, 19 pass |
+| Backend tests | PASS | `npm test` - 42 tests, 42 pass |
 | Backend build (`tsc`) | PASS | emits `backend/dist/server.js` |
 | Frontend typecheck | PASS | `tsc --noEmit` clean |
 | Frontend lint | PASS | `eslint` clean |
@@ -40,7 +40,8 @@ on that machine's toolchain.
 | Graceful shutdown | PASS | SIGTERM/SIGINT close server, sockets and pool |
 | Health endpoint | PASS | `GET /api/health` returns `{"ok":true,...}` |
 | System status probes | PASS | `GET /api/system/status` reports each component |
-| OpenRouter integration | NOT CONFIGURED | no API key here; `/api/health` reports `not_configured` |
+| OpenRouter integration | PASS | live key configured; HTTP 200 completion; `/api/health` reports `configured`; daily-quota 429 handled honestly |
+| Agent loop (real tools) | PASS | run reached `succeeded`; source file repaired on disk and APK hash matched the inspection record |
 | Docker sandbox | PASS | commands ran in the sandbox image as uid 1000 with no socket |
 
 ## Android
@@ -52,7 +53,8 @@ on that machine's toolchain.
 | `assembleDebug` | PASS | APK produced on disk |
 | APK exists and is valid | PASS | `aapt2 dump badging` on the file |
 | APK inspection | PASS | package/version/minSdk/targetSdk/components read from the built APK; values match `aapt2 dump badging` |
-| APK secret scan | PASS | unzipped and grepped; clean |
+| APK secret scan | PASS | unzipped and grepped; clean; a planted key was detected and masked, and never echoed in full |
+| Failed build reports no artifact | PASS | broken Kotlin source → `status: failed`, `apk: null`, zero `apk produced` log lines |
 | Emulator preview | NOT AVAILABLE | no emulator, no KVM; endpoint reports `ANDROID PREVIEW: NOT AVAILABLE` |
 | CI APK workflow | NOT TESTED | `.github/workflows/build-apk.yml` is written but has not run here |
 

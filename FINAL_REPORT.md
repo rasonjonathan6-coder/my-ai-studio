@@ -231,3 +231,127 @@ The Android build and inspection paths need either a mounted SDK
 4. The tree is uncommitted; create the repository and push when ready.
 5. Oracle, Cloudflare Pages and Supabase have documented setup procedures but
    no live deployment was performed from here.
+
+---
+
+## ADDENDUM — 2026-09-23 (evening): live agent loop, fix-cycle and export verification
+
+The status summary above was produced before the live OpenRouter key was
+supplied. The key was then used, and this addendum records what changed as a
+result. It supersedes the two `NOT TESTED`/`NOT CONFIGURED` lines for
+OpenRouter and the agent loop.
+
+### OpenRouter — now PASS
+
+A real key is configured in `.env` and injected into the backend container only.
+`GET /api/health` reports `openrouter: "configured"`. A direct completion against
+`openrouter/free` returned HTTP 200 in 625 ms. The key never appears in any
+response body, log line, container inspect output, exported ZIP or APK — verified
+by grep, not assumed.
+
+### Agent loop — verified end to end, twice
+
+Two bugs found during this run and fixed for real:
+
+1. **Hung run (`dc61c963`).** A run sat in `analyzing` for over ten minutes at 0%
+   CPU with no model call completing. Root cause: `fetchWithTimeout` cleared its
+   timer as soon as response *headers* arrived, leaving the body read unbounded.
+   The connection to OpenRouter was established but the stream never finished, so
+   the run waited forever. Fix: the timeout now covers the body read. A regression
+   test proves the old code hangs (process `Terminated`, exit 143) and the fixed
+   code times out cleanly.
+2. **Stale APK on a failed build.** A build that exited non-zero still reported the
+   APK from an earlier successful build. Fix: a failed build logs `BUILD FAILED`
+   and attaches no artifact.
+
+Verification of the second fix, against the real API:
+
+```
+POST /api/projects/:id/build  {"kind":"android-debug"}   (source has a real
+                                                          Kotlin compile error)
+→ status: failed, apk: null
+→ docker logs mas-api | grep -c 'apk produced'  →  0
+```
+
+Then the source was repaired and rebuilt: `status: succeeded`, APK
+3 190 959 bytes, SHA-256
+`2ea081f1267678dc13babbc5a7463b879bff01991af59b6d8d242d09882f54c1`, and the
+inspection record read back from the database matches that hash exactly.
+
+### Full loop, real tools, scripted model transport
+
+OpenRouter's free tier allows a fixed number of requests per day; the allowance
+was exhausted mid-session (HTTP 429, `free-models-per-day`, reset 2026-09-24
+00:00 UTC). The client was changed to detect this, stop retrying, and report the
+reset timestamp instead of burning attempts. That is a real limitation of the
+free tier, recorded here rather than worked around.
+
+To keep verifying while the quota was spent, `scripts/scripted-model.mjs`
+replaces **only the model transport**. The loop was then driven through the real
+backend, and every tool it triggered ran for real:
+
+| Step | Transcript record | Ground truth on disk |
+| --- | --- | --- |
+| 1 | `read_file` ok, size 1076 | file existed with the planted error |
+| 2 | `edit_file` ok, mode overwrite, size 1072 | `Calculator.powerOf` gone, `Calculator.add` back |
+| 3 | `build_android` ok, `status: succeeded` | APK 3 190 959 bytes written by Gradle |
+| 4 | `done` | run status `succeeded`, phase `completed` |
+
+The loop's own VERIFY phase runs the real build regardless of what the model
+claims, so a scripted model cannot cause a false success.
+
+### Security scan — PASS, negative case included
+
+```
+POST /api/projects/:id/security/scan   (clean project)   → status: clean, 10 files
+planted OPENROUTER_API_KEY=sk-or-... in a resource file  → status: findings
+                                                          → 3 findings, key masked
+                                                          → full key leaked? False
+after deleting the file                                  → status: clean, 0 findings
+```
+
+### Export — PASS
+
+`POST /api/projects/:id/export` produced a 51 055-byte ZIP. Inspection with
+`zipfile` shows 35 entries, **zero** matching `.env`, `secret`, `credential`,
+`.pem`, `.key`, `node_modules`, `apikey` or `token`, and no `build/` output. The
+APK is served from the dedicated download route, not embedded in the source ZIP.
+
+### Android preview — NOT AVAILABLE, honestly
+
+`POST /api/projects/:id/preview` returns `available: false`, `status:
+NOT_AVAILABLE`, and the message `adb present but no device/emulator is attached`.
+No screenshot is fabricated. The response carries the package name it would have
+installed and the single real step that was attempted (`adb devices`, empty).
+
+### System status — real probes
+
+`GET /api/system/status` on this host reports: node `AVAILABLE`,
+java `AVAILABLE` (17.0.20.1), git `AVAILABLE`, docker `AVAILABLE` (daemon
+reachable), adb `AVAILABLE`, androidSdk `AVAILABLE`, python `AVAILABLE`,
+postgres `AVAILABLE` (16.15), gradle `NOT AVAILABLE` (`gradle: not found` — the
+wrapper is used instead), androidEmulator `NOT_AVAILABLE`. `executionBackend:
+docker`, `sandboxEnabled: true`, `jobs: {active:0, pending:0, max:3}`.
+
+### Tests and build after these changes
+
+```
+npm run typecheck   → exit 0 (backend + frontend)
+npm run lint        → exit 0 (backend + frontend)
+npm run test        → backend 42/42 pass, frontend 12/12 pass
+npm run build       → backend tsc clean; frontend built in 1.40s
+```
+
+Three OpenRouter tests were added for the 429 paths: `Retry-After` is surfaced,
+a daily quota is reported with its reset time and not retried, and a retryable
+failure still retries up to the configured maximum.
+
+### Still open after this addendum
+
+1. A live model-driven run that repairs the Kotlin error has not been observed —
+   the free-tier quota blocked it. Re-run after 2026-09-24 00:00 UTC, or add
+   credits, or point `OPENROUTER_MODEL` at another model. The mechanism itself is
+   proven by the scripted-transport run above.
+2. GitHub Actions remain `NOT TESTED` (never dispatched on a runner).
+3. No emulator host is available, so Android preview stays `NOT AVAILABLE`.
+4. The tree is still uncommitted.

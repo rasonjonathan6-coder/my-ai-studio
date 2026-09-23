@@ -133,6 +133,62 @@ test('a timeout is reported as retryable without hanging', async () => {
   assert.equal(out.retryable, true);
 });
 
+test('a stalled response body still times out instead of hanging forever', async () => {
+  // Reproduces the failure where a provider sends headers and then stalls the
+  // stream. `fetch` resolves on the headers, so a timeout that only covers the
+  // fetch call is cleared before the body ever arrives and the caller hangs.
+  const svc = reset((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.write('{"choices":[{"message":{"content":"partial');
+  });
+  const started = Date.now();
+  const out = await svc.chat({ messages: [{ role: 'user', content: 'hi' }], timeoutMs: 500 });
+  const elapsed = Date.now() - started;
+  assert.equal(out.ok, false);
+  if (out.ok) return;
+  assert.equal(out.kind, 'timeout');
+  assert.ok(elapsed < 5000, `expected the client to give up promptly, took ${elapsed}ms`);
+});
+
+test('a 429 surfaces the provider Retry-After delay', async () => {
+  const svc = reset((_req, res) => {
+    res.writeHead(429, { 'retry-after': '2', 'content-type': 'application/json' });
+    res.end('{"error":{"message":"rate limited"}}');
+  });
+  const out = await svc.chat({ messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(out.ok, false);
+  if (out.ok) return;
+  assert.equal(out.kind, 'rate_limited');
+  assert.equal(out.retryable, true);
+  assert.equal(out.retryAfterMs, 2000);
+});
+
+test('an exhausted daily free quota is reported with its reset time and not retried', async () => {
+  const resetMs = Date.UTC(2026, 8, 24, 0, 0, 0);
+  const svc = reset((_req, res) => {
+    res.writeHead(429, {
+      'content-type': 'application/json',
+      'x-ratelimit-limit': '50',
+      'x-ratelimit-remaining': '0',
+      'x-ratelimit-reset': String(resetMs),
+    });
+    res.end(JSON.stringify({
+      error: {
+        message: 'Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day',
+        code: 429,
+      },
+    }));
+  });
+  const out = await svc.chat({ messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(out.ok, false);
+  if (out.ok) return;
+  assert.equal(out.kind, 'rate_limited');
+  assert.equal(out.retryable, false, 'a daily quota must not be retried inside the same run');
+  assert.match(out.message, /daily free-model quota exhausted/);
+  assert.match(out.message, new RegExp(new Date(resetMs).toISOString()));
+  assert.equal(requestCount, 1, 'no retry should be attempted');
+});
+
 test('retries a retryable failure up to the configured maximum', async () => {
   config.openRouterMaxRetries = 2;
   const svc = reset((_req, res) => { res.writeHead(503); res.end('unavailable'); });

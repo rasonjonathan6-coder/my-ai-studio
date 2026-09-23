@@ -35,6 +35,7 @@ export interface ChatFailure {
   message: string;
   status?: number;
   retryable: boolean;
+  retryAfterMs?: number;
 }
 
 export type ChatOutcome = ChatResult | ChatFailure;
@@ -82,7 +83,8 @@ export class OpenRouterService {
 
       if (outcome.kind === 'aborted' || !outcome.retryable || attempt === maxRetries) break;
 
-      const backoffMs = Math.min(8000, 500 * 2 ** attempt) + Math.floor(Math.random() * 250);
+      const exponential = Math.min(8000, 500 * 2 ** attempt) + Math.floor(Math.random() * 250);
+      const backoffMs = Math.max(exponential, outcome.retryAfterMs ?? 0);
       logger.warn('openrouter retry', { attempt: attempt + 1, kind: outcome.kind, status: outcome.status, backoffMs });
       await new Promise((r) => setTimeout(r, backoffMs));
     }
@@ -129,7 +131,38 @@ export class OpenRouterService {
     }
 
     if (res.status === 429) {
-      return { ok: false, kind: 'rate_limited', message: 'rate limited by OpenRouter', status: 429, retryable: true };
+      const retryAfter = Number(res.headers.get('retry-after'));
+      const retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : undefined;
+      let body = '';
+      try {
+        body = await res.text();
+      } catch {
+        body = '';
+      }
+      // A daily free-tier quota is exhausted until a fixed reset timestamp, so
+      // retrying within the same run is pointless. Report when it comes back
+      // instead of burning attempts against a wall.
+      const daily = /free-models-per-day/i.test(body) || /openrouter_free_tier_daily/i.test(body);
+      if (daily) {
+        const resetHeader = res.headers.get('x-ratelimit-reset');
+        const resetMs = Number(resetHeader);
+        const resetIso = Number.isFinite(resetMs) && resetMs > 0 ? new Date(resetMs).toISOString() : null;
+        return {
+          ok: false,
+          kind: 'rate_limited',
+          message: `daily free-model quota exhausted${resetIso ? `; resets at ${resetIso}` : ''}`,
+          status: 429,
+          retryable: false,
+        };
+      }
+      return {
+        ok: false,
+        kind: 'rate_limited',
+        message: retryAfterMs ? `rate limited by OpenRouter (retry after ${retryAfterMs}ms)` : 'rate limited by OpenRouter',
+        status: 429,
+        retryable: true,
+        retryAfterMs,
+      };
     }
     if (res.status === 402) {
       return { ok: false, kind: 'model_unavailable', message: 'insufficient credits for this model', status: 402, retryable: false };
@@ -193,6 +226,11 @@ export class OpenRouterService {
     };
   }
 
+  // The timer must outlive the response body read. `fetch()` resolves as soon
+  // as the headers arrive, so clearing the timer in a `finally` around the fetch
+  // call leaves the body download unbounded: a provider that sends headers and
+  // then stalls the stream hangs the caller forever. The caller therefore gets a
+  // response whose body is already buffered, and only then is the timer cleared.
   private async fetchWithTimeout(
     url: string,
     init: RequestInit,
@@ -203,11 +241,16 @@ export class OpenRouterService {
     const timer = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
     const onExternalAbort = (): void => controller.abort(new Error('aborted'));
     externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
-    try {
-      return await fetch(url, { ...init, signal: controller.signal });
-    } finally {
+    const cleanup = (): void => {
       clearTimeout(timer);
       externalSignal?.removeEventListener('abort', onExternalAbort);
+    };
+    try {
+      const res = await fetch(url, { ...init, signal: controller.signal });
+      const body = await res.arrayBuffer();
+      return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
+    } finally {
+      cleanup();
     }
   }
 }

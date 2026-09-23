@@ -26,11 +26,11 @@ inferred from intent. Every status is one of:
 | OPENROUTER | PASS | live key used; HTTP 200 completion; `/api/health` reports `configured`; key never echoed |
 | AGENT LOOP | PASS | live run: reading -> editing -> testing -> building -> completed; code change and APK independently verified |
 | OPENHANDS | NOT AVAILABLE | no OpenHands agent-server endpoint reachable from this environment |
-| DOCKER | PASS | backend image built; container ran; full smoke suite executed inside it |
+| DOCKER | PASS | backend image built; container ran; full smoke suite executed inside it; sandbox runs as uid 1000, cannot reach `169.254.169.254`, and legitimate egress still works |
 | GITHUB ACTIONS | NOT TESTED | four workflows written; never dispatched on a runner |
 | ANDROID SDK | PASS (host) | build-tools 34.0.0, platform-tools, adb on the host |
 | ANDROID BUILD | PASS | `./gradlew test` and `./gradlew assembleDebug` ran for real |
-| APK | PASS | three templates each built a real `app-debug.apk`; release APK 3 191 115 bytes, SHA-256 `e6a99ba41f26cffdd179e478fa9d0d83c2923b086d68d30797766875a6bbd2ff` |
+| APK | PASS | each template built a real `app-debug.apk`; the APK currently shipped in `release/` is 3 189 843 bytes, SHA-256 `c8fa61b9654c84e1eed5281fbe163383916806cb179b53a82cdd79d2138c2396` |
 | APK INSPECTION | PASS | real `aapt2` + `apksigner`: package/version/min-target read from the APK; signature verified as debug-signed with the v2 scheme |
 | APK SECURITY SCAN | PASS | archive unzipped and pattern-scanned; a planted key was detected and masked, and the clean templates report `clean` |
 | ANDROID EMULATOR | NOT AVAILABLE | no emulator, no `/dev/kvm`; `adb devices` is empty |
@@ -440,4 +440,7 @@ graceful shutdown  → docker kill --signal=TERM mas-api logs
 destructive policy → "rm -rf /workspace" and "rm -rf /" both exit 126 with
                      "BLOCKED BY POLICY"; "./gradlew --version" still exit 0
 release            → rebuilt from HEAD 70a10d4; 25/25 checksums OK
+sandbox network    → cloud metadata 169.254.169.254 unreachable from inside
+                     (curl exit 28, timeout); legitimate egress works
+                     (https://api.github.com -> 200); runs as uid/gid 1000
 ```

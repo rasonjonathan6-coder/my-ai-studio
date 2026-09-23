@@ -49,6 +49,20 @@ root-level install.
   A query that assumes otherwise will fail even though the application is fine.
 - Gradle is invoked through the project's wrapper, not a system `gradle`, so
   `GET /api/system/status` reporting gradle as `NOT AVAILABLE` is expected.
+- The command deny list is two-tiered and this is deliberate. Patterns whose
+  target is the execution environment (`rm -rf /`, `rm -rf /workspace`, fork
+  bombs, disk wipes, reverse shells) apply on **both** backends, because the
+  sandbox mounts the project read-write at `/workspace` and would otherwise let
+  a command delete the project it is building. Host-only patterns (docker socket,
+  `sudo`, `shutdown`) must not be blocked inside the container or legitimate
+  builds break. `hostDenyReason` and `sandboxDenyReason` are separate exports for
+  this reason; use `denyReasonFor(command, backend)` when you need the right one.
+- A command that deletes files *inside* the project is allowed by design. The
+  deny list cannot protect a project from its own model, only from wiping the
+  mount root. Do not add tests that assume otherwise.
+- Running a destructive command through the terminal endpoint during testing
+  damages a real workspace. Use a scratch project you do not need, and check
+  `git status` in the project afterwards.
 
 ## Model integration
 

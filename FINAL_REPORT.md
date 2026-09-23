@@ -23,7 +23,8 @@ inferred from intent. Every status is one of:
 | FRONTEND | PASS | typecheck, lint, 12/12 tests, production build 195.97 kB JS / 59.59 kB gzip |
 | BACKEND | PASS | typecheck, lint, 39/39 tests (incl. 12 OpenRouter tests against a real local HTTP server), real HTTP smoke 15/15 |
 | DATABASE | PASS | PostgreSQL 16.15 reachable; migrations applied; auth and project rows persisted and read back |
-| OPENROUTER | NOT CONFIGURED | no `OPENROUTER_API_KEY`; integration implemented, `/api/health` reports `not_configured` |
+| OPENROUTER | PASS | live key used; HTTP 200 completion; `/api/health` reports `configured`; key never echoed |
+| AGENT LOOP | PASS | live run: reading -> editing -> testing -> building -> completed; code change and APK independently verified |
 | OPENHANDS | NOT AVAILABLE | no OpenHands agent-server endpoint reachable from this environment |
 | DOCKER | PASS | backend image built; container ran; full smoke suite executed inside it |
 | GITHUB ACTIONS | NOT TESTED | four workflows written; never dispatched on a runner |
@@ -124,20 +125,50 @@ does carry it, and the smoke suite exercised it there successfully.
 
 ---
 
-## DEGRADED AND ABSENT CAPABILITIES
+## LIVE OPENROUTER AND END-TO-END AGENT RUN
 
-### OPENROUTER — NOT CONFIGURED
+### OPENROUTER — PASS (verified against the live API)
 
-No API key was provided. The client (`src/services/openrouter.ts`) implements
-timeouts, HTTP error mapping, rate-limit handling, invalid-response detection,
-unavailable-model handling and bounded retry with backoff. It has not been
-exercised against the live API. `/api/health` reports `openrouter:
-"not_configured"` and never echoes the key. The agent refuses to fabricate a
-reply when unconfigured and says so instead — verified by the smoke check
-"agent honestly reports not configured".
+An `OPENROUTER_API_KEY` was supplied and the integration was exercised for real.
 
-How to enable: set `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` in the backend
-environment. See `OPENROUTER_SETUP.md`.
+- The client's error mapping, timeout, retry and redaction behaviour were unit
+  tested against a real local HTTP server (12 tests in `tests/openrouter.test.ts`).
+- A direct call from the backend container returned HTTP 200 with a genuine
+  completion, served by `nvidia/nemotron-3-super-120b-a12b:free`.
+- `GET /api/health` reports `openrouter: "configured"` and never echoes the key.
+
+### AGENT LOOP — PASS (real work, not scripted)
+
+Two runs were executed against the live model:
+
+1. A read-only prompt. The agent listed the project root and read
+   `MainActivity.kt`, then summarised it accurately. No files were modified.
+2. A change prompt. The observed phases were
+   `reading → editing → testing → building → completed`. The agent added
+   `Calculator.power(base, exponent)` to `Calculator.kt`, added a `powerWorks`
+   test covering positive, zero and negative exponents, ran the unit tests
+   (10 passed, 0 failed) and built a debug APK.
+
+Both claims were checked independently against the filesystem:
+
+| Claim | Verification |
+| --- | --- |
+| `power()` added | Present in `Calculator.kt` on disk |
+| Test added | `powerWorks` present in `CalculatorTest.kt` |
+| APK size 3 191 195 bytes | `stat` on the APK reports exactly 3 191 195 bytes |
+
+Live events were streamed over the WebSocket during the run and the Gradle log
+was observed as it was produced.
+
+### SECRET CONTAINMENT — PASS
+
+The live key was searched for after the runs and was absent from: the project
+workspace, the built APK, the backend container logs, the export ZIP and every
+git-tracked file. `scripts/dev-stack.sh` reads the key from the gitignored
+`.env` and passes it to the container without echoing it.
+
+**Note:** the key was pasted into the chat and is therefore present in this
+conversation's history. It should be rotated once verification is complete.
 
 ### ANDROID EMULATOR — NOT AVAILABLE
 

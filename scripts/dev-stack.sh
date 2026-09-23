@@ -81,6 +81,7 @@ start_backend() {
     -e GRADLE_USER_HOME="$GRADLE_CACHE" \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v /data/workspaces:/data/workspaces -v /data/storage:/data/storage \
+    -v "$SDK_DIR:$SDK_DIR:ro" \
     "$BACKEND_IMAGE" >/dev/null || exit 1
 
   for _ in $(seq 1 40); do

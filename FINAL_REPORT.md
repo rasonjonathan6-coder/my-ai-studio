@@ -236,6 +236,20 @@ real backend payload and asserts the message, package and step text appear and
 that the string `undefined` does not. The test was mutation-checked: reverting
 the field to `preview.reason` turns it red.
 
+Confirmed live in the served app after the rebuild. The Preview tab renders
+
+```
+not available
+ANDROID PREVIEW: NOT AVAILABLE - adb present but no device/emulator is attached.
+adb devices   (none)
+package       (unknown)
+installed     false
+launched      false
+✗ adb devices  adb present but no device/emulator is attached
+```
+
+with no image or mocked frame, because the endpoint genuinely found no device.
+
 ### Re-run after the fix
 
 ```

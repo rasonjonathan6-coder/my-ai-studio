@@ -101,13 +101,79 @@ function baseEnv(extra: Record<string, string> = {}): Record<string, string> {
  * user home. Both the docker backend (passed via `docker run -e`) and the host
  * backend need it, and leaving it out produces the classic
  * "SDK location not found" failure, so build and test share this.
+ *
+ * The Gradle home is verified to be writable by the execution backend before it
+ * is advertised. A bind-mounted cache directory that is missing or owned by
+ * another uid makes Gradle fail while creating its wrapper lock file, which
+ * looks like a build error even though the project is fine, so an unusable
+ * cache is replaced with an in-container path and the fallback is logged.
  */
-export function toolchainEnv(): Record<string, string> {
-  return {
+export async function toolchainEnv(): Promise<Record<string, string>> {
+  const base: Record<string, string> = {
     ...(config.androidHome ? { ANDROID_HOME: config.androidHome, ANDROID_SDK_ROOT: config.androidHome } : {}),
     ...(config.javaHome ? { JAVA_HOME: config.javaHome } : {}),
     GRADLE_USER_HOME: config.gradleUserHome,
   };
+
+  // adb, aapt2 and apksigner live under platform-tools and build-tools and are
+  // not on the default PATH, so a build could succeed while `inspect` reported
+  // the SDK as missing. PATH is set explicitly (never inherited) to keep the
+  // server's own environment out of the sandbox.
+  const pathParts = [
+    ...(config.androidHome ? [`${config.androidHome}/platform-tools`, `${config.androidHome}/cmdline-tools/latest/bin`] : []),
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
+  ];
+  base.PATH = pathParts.join(':');
+
+  const backend = await resolveBackend('auto');
+  if (backend === 'docker' && config.gradleUserHome && !(await sandboxDirWritable(config.gradleUserHome))) {
+    logger.warn('configured GRADLE_USER_HOME is not writable in the sandbox; using an ephemeral cache', {
+      configured: config.gradleUserHome,
+    });
+    base.GRADLE_USER_HOME = SANDBOX_FALLBACK_GRADLE_HOME;
+  }
+
+  return base;
+}
+
+/** In-sandbox home used when the mounted Gradle cache cannot be written to. */
+const SANDBOX_FALLBACK_GRADLE_HOME = '/tmp/gradle-home';
+
+const writableDirCache = new Map<string, Promise<boolean>>();
+
+/**
+ * Probes whether `dir` is writable inside the sandbox. The result is cached per
+ * path because the probe costs a container start and the answer only changes
+ * when the operator remounts the volume.
+ */
+function sandboxDirWritable(dir: string): Promise<boolean> {
+  const cached = writableDirCache.get(dir);
+  if (cached) return cached;
+
+  const probe = new Promise<boolean>((resolve) => {
+    const child = spawn(
+      'docker',
+      [
+        'run', '--rm', '--network', 'none', '--user', '1000:1000',
+        ...config.sandbox.extraMounts.flatMap((m) => ['-v', m]),
+        config.sandbox.image,
+        '/bin/sh', '-c', `mkdir -p ${shellQuote(dir)} && test -w ${shellQuote(dir)}`,
+      ],
+      { stdio: 'ignore' },
+    );
+    child.on('error', () => resolve(false));
+    child.on('close', (code) => resolve(code === 0));
+    setTimeout(() => child.kill('SIGKILL'), 15000).unref();
+  });
+
+  writableDirCache.set(dir, probe);
+  return probe;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 export async function dockerAvailable(): Promise<boolean> {

@@ -170,7 +170,7 @@ export async function runBuild(input: {
     cwd: root,
     command: detection.command,
     timeoutMs: config.buildTimeoutMs,
-    env: toolchainEnv(),
+    env: await toolchainEnv(),
     onChunk: (stream, text) => logEvent(input.projectId, 'build_log', stream === 'stderr' ? 'warn' : 'info', text),
   });
 

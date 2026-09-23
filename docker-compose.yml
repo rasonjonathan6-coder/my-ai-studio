@@ -71,6 +71,11 @@ services:
     profiles: ['sandbox']
     build:
       context: ./sandbox
+      # The sandbox runs Gradle, so it needs a JDK. Without this the image has
+      # no `java` and every build fails with "JAVA_HOME is set to an invalid
+      # directory". Set INSTALL_ANDROID_TOOLCHAIN=1 in .env to enable it.
+      args:
+        INSTALL_ANDROID_TOOLCHAIN: ${INSTALL_ANDROID_TOOLCHAIN:-1}
     image: my-ai-studio-sandbox:latest
     # Never started as a service; it is an image for `docker run`.
     command: ['true']

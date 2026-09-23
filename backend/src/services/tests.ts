@@ -183,7 +183,7 @@ export async function runTests(input: {
     cwd: ws.root,
     command,
     timeoutMs: config.buildTimeoutMs,
-    env: toolchainEnv(),
+    env: await toolchainEnv(),
     onChunk: (stream, text) => logEvent(input.projectId, 'test_log', stream === 'stderr' ? 'warn' : 'info', text),
   });
 

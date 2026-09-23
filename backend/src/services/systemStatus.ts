@@ -98,24 +98,121 @@ async function diskProbe(): Promise<SystemStatus['disk']> {
   }
 }
 
+const SANDBOX_PROBE_TIMEOUT_MS = 25000;
+
+/**
+ * Runs a command inside the sandbox image and returns its combined output.
+ * Used for toolchain probes so the reported state matches the environment the
+ * agent's commands actually execute in.
+ */
+async function runSandboxCommand(command: string, timeoutMs = SANDBOX_PROBE_TIMEOUT_MS): Promise<{ ok: boolean; output: string; code: number | null }> {
+  return new Promise((resolve) => {
+    const args = [
+      'run', '--rm', '--init', '--network', 'none', '--user', '1000:1000',
+      ...config.sandbox.extraMounts.flatMap((m) => ['-v', m]),
+      ...Object.entries(probeEnv()).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+      config.sandbox.image,
+      '/bin/sh', '-c', command,
+    ];
+    execFile('docker', args, { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+      const output = `${stdout}${stderr}`.trim();
+      if (err) {
+        const code = typeof (err as NodeJS.ErrnoException & { code?: number }).code === 'number' ? (err as unknown as { code: number }).code : null;
+        resolve({ ok: false, output, code });
+        return;
+      }
+      resolve({ ok: true, output, code: 0 });
+    });
+  });
+}
+
+function probeEnv(): Record<string, string> {
+  const androidHome = config.androidHome || process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || '';
+  const env: Record<string, string> = {
+    // Mirrors the PATH used for real commands so a tool that works during a
+    // build also probes as AVAILABLE (platform-tools holds adb).
+    PATH: [
+      ...(androidHome ? [`${androidHome}/platform-tools`, `${androidHome}/cmdline-tools/latest/bin`] : []),
+      '/usr/local/bin', '/usr/bin', '/bin',
+    ].join(':'),
+  };
+  if (androidHome) env.ANDROID_HOME = androidHome;
+  if (androidHome) env.ANDROID_SDK_ROOT = androidHome;
+  return env;
+}
+
+/**
+ * Interprets a sandbox probe. A missing binary surfaces as exit code 127 and a
+ * "not found" message rather than ENOENT, because the command ran through a
+ * shell, so both signals are treated as NOT_AVAILABLE.
+ */
+function sandboxProbeResult(name: string, result: { ok: boolean; output: string; code: number | null }, versionPattern?: RegExp): Probe {
+  if (result.ok) {
+    const version = versionPattern ? (result.output.match(versionPattern)?.[0] ?? null) : (result.output.split('\n')[0] ?? null);
+    return { name, state: 'AVAILABLE', version: version?.slice(0, 120) ?? null, detail: null };
+  }
+  const notFound = result.code === 127 || /not found|No such file|executable file not found/i.test(result.output);
+  return {
+    name,
+    state: notFound ? 'NOT_AVAILABLE' : 'ERROR',
+    version: null,
+    detail: (result.output.split('\n').filter((l) => l.trim()).slice(-1)[0] ?? null)?.slice(0, 200) ?? null,
+  };
+}
+
+async function sandboxToolProbe(name: string, cmd: string, args: string[]): Promise<Probe> {
+  const result = await runSandboxCommand([cmd, ...args].join(' '));
+  return sandboxProbeResult(name, result);
+}
+
+async function sandboxJavaProbe(): Promise<Probe> {
+  const result = await runSandboxCommand('java -version');
+  return sandboxProbeResult('java', result, /version "[^"]+"/);
+}
+
+async function sandboxSdkProbe(androidHome: string): Promise<Probe> {
+  if (!androidHome) return { name: 'androidSdk', state: 'NOT_AVAILABLE', version: null, detail: 'ANDROID_HOME not configured' };
+  const result = await runSandboxCommand(`test -d ${androidHome}/platform-tools && test -d ${androidHome}/build-tools && echo ok`);
+  if (!result.ok) {
+    return { name: 'androidSdk', state: 'NOT_AVAILABLE', version: null, detail: `missing platform-tools/build-tools under ${androidHome} (in sandbox)` };
+  }
+  return { name: 'androidSdk', state: 'AVAILABLE', version: androidHome, detail: null };
+}
+
 export async function getSystemStatus(): Promise<SystemStatus> {
   const androidHome = config.androidHome || process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || '';
   const javaHome = config.javaHome || process.env.JAVA_HOME || '';
 
+  const backend = await resolveBackend('auto');
+
+  // When the docker backend is active, agent commands run inside the sandbox
+  // image, not in this process. A toolchain probe must therefore look where the
+  // commands will actually execute. Probing only the backend image reports
+  // NOT_AVAILABLE for Gradle and the SDK even while a build is succeeding, which
+  // makes the Build Center lie to the user.
+  const inSandbox = backend === 'docker';
+  const probeTool = inSandbox
+    ? (name: string, cmd: string, args: string[]) => sandboxToolProbe(name, cmd, args)
+    : (name: string, cmd: string, args: string[]) => toolProbe(name, cmd, args);
+
   const [node, java, git, docker, gradle, adb, python] = await Promise.all([
     toolProbe('node', 'node', ['--version']),
-    javaHome
-      ? pathProbe('java', javaHome, ['bin/java'])
-      : toolProbe('java', 'java', ['-version']),
+    inSandbox
+      ? sandboxJavaProbe()
+      : javaHome
+        ? pathProbe('java', javaHome, ['bin/java'])
+        : toolProbe('java', 'java', ['-version']),
     toolProbe('git', 'git', ['--version']),
     toolProbe('docker', 'docker', ['--version']),
-    toolProbe('gradle', 'gradle', ['--version']),
-    toolProbe('adb', 'adb', ['version']),
-    toolProbe('python', 'python3', ['--version']),
+    probeTool('gradle', 'gradle', ['--version']),
+    probeTool('adb', 'adb', ['version']),
+    probeTool('python', 'python3', ['--version']),
   ]);
 
-  const androidSdk = await pathProbe('androidSdk', androidHome, ['platform-tools', 'build-tools']);
-  const [database, dockerUp, backend] = await Promise.all([checkDatabase(), dockerAvailable(), resolveBackend('auto')]);
+  const androidSdk = inSandbox
+    ? await sandboxSdkProbe(androidHome)
+    : await pathProbe('androidSdk', androidHome, ['platform-tools', 'build-tools']);
+  const [database, dockerUp] = await Promise.all([checkDatabase(), dockerAvailable()]);
 
   const dbProbe: Probe = !database.configured
     ? { name: 'postgres', state: 'NOT_AVAILABLE', version: null, detail: 'DATABASE_URL not configured' }
@@ -135,9 +232,13 @@ export async function getSystemStatus(): Promise<SystemStatus> {
     : { name: 'openrouter', state: 'NOT_AVAILABLE', version: orStatus.model, detail: 'OPENROUTER_API_KEY not configured' };
 
   // An emulator needs a device actually attached, not just the adb binary.
+  // The check runs where commands execute, so sandbox adb is consulted when the
+  // docker backend is active.
   let emulatorProbe: Probe = { name: 'androidEmulator', state: 'NOT_AVAILABLE', version: null, detail: 'adb not available' };
   if (adb.state === 'AVAILABLE') {
-    const devices = await probe('adb', ['devices'], 15000);
+    const devices = inSandbox
+      ? await runSandboxCommand('adb devices', 20000)
+      : await probe('adb', ['devices'], 15000);
     const attached = devices.ok
       ? devices.output.split('\n').slice(1).filter((l) => /\t(device|emulator)/.test(l))
       : [];

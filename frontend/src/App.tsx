@@ -1,12 +1,22 @@
-import { useCallback, useState } from 'react';
+import { lazy, Suspense, useCallback, useState } from 'react';
 import { useProjects, useSession } from './hooks/index.ts';
 import { AuthScreen } from './screens/Auth.tsx';
 import { Dashboard } from './screens/Dashboard.tsx';
-import { ProjectsScreen } from './screens/Projects.tsx';
-import { SettingsScreen } from './screens/Settings.tsx';
-import { ProjectWorkspace } from './components/ProjectWorkspace.tsx';
 import { Spinner } from './components/ui.tsx';
 import type { AgentProgress } from './screens/Ai.tsx';
+
+// ProjectWorkspace pulls in the chat, file explorer, terminal and build screens
+// - most of the bundle. It is only needed once a project is open, so it is
+// loaded on demand to keep the first paint small on a phone.
+const ProjectWorkspace = lazy(() =>
+  import('./components/ProjectWorkspace.tsx').then((m) => ({ default: m.ProjectWorkspace })),
+);
+const ProjectsScreen = lazy(() =>
+  import('./screens/Projects.tsx').then((m) => ({ default: m.ProjectsScreen })),
+);
+const SettingsScreen = lazy(() =>
+  import('./screens/Settings.tsx').then((m) => ({ default: m.SettingsScreen })),
+);
 
 type View = 'dashboard' | 'projects' | 'settings';
 
@@ -37,11 +47,13 @@ export function App() {
   const openProjectRecord = projects.find((p) => p.id === openProjectId);
   if (openProjectRecord) {
     return (
-      <ProjectWorkspace
-        project={openProjectRecord}
-        onBack={() => setOpenProjectId(null)}
-        onAgentState={handleAgentState}
-      />
+      <Suspense fallback={<div className="wrap" style={{ paddingTop: '20vh', textAlign: 'center' }}><Spinner label="Loading workspace." /></div>}>
+        <ProjectWorkspace
+          project={openProjectRecord}
+          onBack={() => setOpenProjectId(null)}
+          onAgentState={handleAgentState}
+        />
+      </Suspense>
     );
   }
 
@@ -72,18 +84,20 @@ export function App() {
       </nav>
 
       <main style={{ flex: 1 }}>
-        {view === 'dashboard' && (
-          <Dashboard
-            projects={projects}
-            onOpen={openProject}
-            onRefresh={() => void refresh()}
-            wsConnected={null}
-          />
-        )}
-        {view === 'projects' && (
-          <ProjectsScreen projects={projects} onOpen={openProject} onRefresh={() => void refresh()} />
-        )}
-        {view === 'settings' && <SettingsScreen user={user} onLogout={logout} />}
+        <Suspense fallback={<Spinner label="Loading." />}>
+          {view === 'dashboard' && (
+            <Dashboard
+              projects={projects}
+              onOpen={openProject}
+              onRefresh={() => void refresh()}
+              wsConnected={null}
+            />
+          )}
+          {view === 'projects' && (
+            <ProjectsScreen projects={projects} onOpen={openProject} onRefresh={() => void refresh()} />
+          )}
+          {view === 'settings' && <SettingsScreen user={user} onLogout={logout} />}
+        </Suspense>
       </main>
 
       <nav className="bottom-nav" aria-label="Mobile navigation">

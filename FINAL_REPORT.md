@@ -28,9 +28,11 @@ inferred from intent. Every status is one of:
 | AGENT LOOP | PASS | live run: reading -> editing -> testing -> building -> completed; code change and APK independently verified |
 | OPENHANDS | NOT AVAILABLE | no OpenHands agent-server endpoint reachable from this environment |
 | DOCKER | PASS | backend image built; container ran; full smoke suite executed inside it; sandbox runs as uid 1000, cannot reach `169.254.169.254`, and legitimate egress still works |
-| GITHUB ACTIONS (workflows) | NOT TESTED | four workflows written and YAML-valid; never dispatched on a runner |
-| GITHUB PUBLISH / DISPATCH | PASS (unit) / BLOCKED (live) | Git Data API publish sequence, `base_tree` preservation and managed-workflow install asserted against a local HTTP server; live publish to `rasonjonathan6-coder/app` refused `403` by a read-only credential, reported verbatim |
-| GITHUB WRITE PROBE | PASS | `canWrite` in `/api/system/github` distinguishes a read-only credential from a writable one via a real dangling-blob write; verified live as `false` |
+| GITHUB ACTIONS (workflows) | PASS | five workflows written and YAML-valid; `android-build.yml` dispatched on a real GitHub-hosted runner and the job ran to `success` (JDK, Android SDK, `./gradlew test`, `assembleDebug`, APK locate, artifact upload) |
+| GITHUB PUBLISH / DISPATCH | PASS (live) | publish to `rasonjonathan6-coder/app` over the Git Data API, then dispatch of `android-build.yml`; run `36030411740` reached `success` and the workflow registered once the managed file was on the default branch |
+| GITHUB WRITE PROBE | PASS | `canWrite` in `/api/system/github` distinguishes a read-only credential from a writable one via a real dangling-blob write; verified live as `true` |
+| GITHUB APK ARTIFACT | PASS (live) | `app-debug-apk` artifact (3 189 843 bytes) downloaded through `GET /api/projects/:id/github/build/:buildId/apk` with `Content-Type: application/vnd.android.package-archive`; the bytes are a valid ZIP with `AndroidManifest.xml` and 422 entries |
+| GITHUB RUN LOGS | PASS (live) | `GET …/github/build/:buildId/logs` unpacks GitHub's 28 347-byte archive in-process and returns 81 397 characters of real job text containing `BUILD SUCCESSFUL`; redacted, no token present |
 | ANDROID SDK | PASS (host) | build-tools 34.0.0, platform-tools, adb on the host |
 | ANDROID BUILD | PASS | `./gradlew test` and `./gradlew assembleDebug` ran for real |
 | APK | PASS | each template built a real `app-debug.apk`; the APK currently shipped in `release/` is 3 189 843 bytes, SHA-256 `c8fa61b9654c84e1eed5281fbe163383916806cb179b53a82cdd79d2138c2396` |
@@ -224,66 +226,76 @@ returns `ANDROID PREVIEW: NOT AVAILABLE`. There is no static screenshot or
 substituted image anywhere in this path. The service is written so a real
 emulation host can be attached later without reshaping the API.
 
-### GITHUB ACTIONS — NOT TESTED (workflows) / BLOCKED (live publish)
+### GITHUB ACTIONS — PASS (dispatched on a real runner)
 
-Four workflows exist and are real: `test.yml`, `build.yml`, `build-apk.yml`,
+Five workflows exist and are real: `test.yml`, `build.yml`, `build-apk.yml`,
 `security.yml`, plus the managed `android-build.yml` the server installs into a
 target repository. They checkout, install, lint, test, build and upload
 artifacts, and they fail when the underlying step fails. The APK job verifies
 that `app/build/outputs/apk/debug/app-debug.apk` exists before uploading it and
 fails the job when it does not. All five parse cleanly with `js-yaml`.
 
-The `android-build.yml` steps were executed by hand against the real workspace
-that holds a built APK, and they behave as written: the APK-locate step found
-`./app/build/outputs/apk/debug/app-debug.apk` (3 189 843 bytes), the `PK` header
-check passed, and `sha256sum` returned
-`e1dacaeeb9114b1e212efa6702e45d94bcd73e4f92351a08158aab987ff36380`. The
-secret-scan step was run against a directory with a planted `sk-or-v1-…` literal
-and correctly printed `SECURITY FAILED`.
-
-None of the workflows has been dispatched on a GitHub runner from this
-environment, so their runner status is NOT TESTED rather than PASS.
-
-### GITHUB PUBLISH AND DISPATCH — BLOCKED BY A READ-ONLY CREDENTIAL
-
-The integration that publishes a workspace and dispatches the build is
-implemented and unit-verified:
-
-- `syncWorkspaceToRepo` creates one blob per file, builds a tree over the head
-  commit's tree as `base_tree` (so unaffected files survive a sparse publish),
-  creates a commit parented on the head, and moves the branch. The managed
-  workflow is written into the same commit.
-- `backend/tests/githubBuilds.test.ts` CASE 3 asserts the exact request sequence
-  against a local HTTP server and checks the `base_tree` argument and the three
-  blob paths; CASE 3b asserts that a `403` on blob creation aborts before any
-  tree or commit is attempted.
-- `GET /api/system/github` gained `canWrite`, probed by creating a blob that
-  nothing references. This is a real write, but it cannot touch a branch, a
-  commit or the working tree, and GitHub garbage-collects it.
-
-The live path cannot complete here. The credential is an installation token with
-read-only access to `rasonjonathan6-coder/app`:
+`android-build.yml` has now been dispatched on a GitHub-hosted runner and the
+job ran to completion. Every step reported `success`:
 
 ```
-GET  /repos/rasonjonathan6-coder/app              -> 200
-POST /repos/rasonjonathan6-coder/app/git/blobs    -> 403 Resource not accessible by integration
+test and assemble debug | completed | success
+   2 actions/checkout@v4            success
+   3 actions/setup-java@v4          success
+   5 Ensure Android SDK is usable   success
+   7 Verify gradlew                 success
+   8 Run unit tests                 success
+   9 Assemble debug APK             success
+  10 Locate the APK for real        success
+  11 Package APK with build metadata success
+  12 Upload APK                    success
+  13 Upload test reports           success
 ```
 
-`GET /api/system/github` therefore reports `canWrite: false`, and
-`POST /api/projects/:id/github/build` answers with the refusal verbatim:
+Two artifacts were published: `app-debug-apk` (3 189 843 bytes) and
+`test-reports` (14 457 bytes). Run `36030411740` on branch
+`my-ai-studio-build`.
 
-```
-{ "error": "the project could not be published to GitHub, so no workflow was dispatched",
-  "detail": "blob creation failed: 403 Resource not accessible by integration" }
-```
+### GITHUB PUBLISH AND DISPATCH — PASS (live, end to end)
 
-That is the correct, honest outcome — no run was started and no publish was
-claimed. Granting the credential `contents: write` and `actions: write` (or
-supplying a `GITHUB_TOKEN` with them) is the only remaining step; the capability
-probe will then report `canWrite: true` and the same routes publish and dispatch
-without further code changes.
+The integration publishes a workspace and dispatches the build. Verified live
+against `rasonjonathan6-coder/app` with a fine-grained PAT held only in the
+server environment:
 
-**GITHUB PUBLISH / DISPATCH E2E: BLOCKED (read-only credential).**
+1. `POST /api/projects/:id/github/sync` returned HTTP 200, pushed 15 files to
+   `my-ai-studio-build` (commit `8a9eb825b323…`), and reported
+   `workflowOnDefaultBranch: main`.
+2. `POST /api/projects/:id/github/build` returned HTTP 202 with
+   `status: queued`; the run resolved to `36030411740` and reached `success`.
+3. `GET …/github/build/:buildId/apk` returned HTTP 200,
+   `Content-Type: application/vnd.android.package-archive`,
+   `Content-Length: 3189843`; the downloaded bytes are a valid ZIP carrying
+   `AndroidManifest.xml` and 422 entries.
+4. `GET …/github/build/:buildId/logs` returned 81 397 characters of real job
+   text including `BUILD SUCCESSFUL`, with no credential in it.
+
+Two defects were found and fixed while proving this path:
+
+- **Dispatch answered 404.** GitHub only registers a `workflow_dispatch`
+  workflow that exists on the *default* branch; publishing to the build branch
+  alone left `GET /actions/workflows` at 0. A publish now also installs the
+  managed workflow on the default branch, skipping the write when the same blob
+  is already present so a user's default branch is not rewritten on each sync.
+- **Logs returned an archive description.** The endpoint reported the byte size
+  of GitHub's log zip instead of its contents. It now unpacks the archive
+  in-process and returns the real per-job text, redacted, and still refuses
+  non-archives rather than presenting binary as a log.
+
+Covered by tests: CASE 3 asserts the publish request sequence and the
+default-branch install; CASE 3c asserts an already-current default branch is
+left untouched; CASE 3b asserts a refused write aborts before any commit; CASE
+16 asserts log extraction and masking.
+
+The credential is server-side only: git-ignored, untracked, mode `600`,
+excluded from exports, absent from logs and from the built frontend bundle, and
+never written to the repository or an artifact.
+
+**GITHUB PUBLISH / DISPATCH E2E: PASS.**
 
 ### ORACLE CLOUD DEPLOYMENT — NOT TESTED
 

@@ -191,23 +191,39 @@ tree.
 ## Verification status of the live path
 
 The publishing and dispatching code paths are covered by tests against a local
-HTTP server (`backend/tests/githubBuilds.test.ts`, CASE 3 and 3b) that assert the
-exact request sequence, the `base_tree` argument, and that a refused write
-aborts before any commit.
+HTTP server (`backend/tests/githubBuilds.test.ts`) that assert the exact request
+sequence, the `base_tree` argument, the default-branch install, and that a
+refused write aborts before any commit:
 
-Running the same path against GitHub itself is currently blocked: the credential
-available to this sandbox is an installation token with read-only access to
-`rasonjonathan6-coder/app`. Reads succeed (`GET /repos/...` -> `200`); writes are
-refused (`POST /repos/.../git/blobs` -> `403 Resource not accessible by
-integration`), so `GET /api/system/github` reports `canWrite: false` and dispatch
-returns the 403 verbatim.
+- CASE 3 - the publish sequence and the managed-workflow install.
+- CASE 3c - an already-current default branch is left untouched.
+- CASE 3b - a refused write stops the publish before any commit.
+- CASE 16 - a run-log archive is unpacked into real text; non-archives refused.
 
-To complete the end-to-end run, grant the credential `contents: write` and
-`actions: write` for the repository - either re-install the GitHub App with those
-permissions, or supply a `GITHUB_TOKEN` that has them. The capability probe will
-then report `canWrite: true` and the same routes will publish and dispatch.
+The live path has since been verified end to end against
+`rasonjonathan6-coder/app` with a fine-grained PAT held only in the server
+environment. The token permissions required are: **Contents** read/write,
+**Actions** read/write, **Workflows** read/write, **Metadata** read-only.
 
-**GITHUB PUBLISH / DISPATCH E2E: BLOCKED (read-only credential).**
+Results, all through My AI Studio's own routes:
+
+| Step | Route | Result |
+| --- | --- | --- |
+| capability probe | `GET /api/system/github` | `state AVAILABLE`, `canWrite true` |
+| publish | `POST /api/projects/:id/github/sync` | HTTP 200, 15 files, `workflowOnDefaultBranch: main` |
+| dispatch | `POST /api/projects/:id/github/build` | HTTP 202, `status: queued`, run `36030411740` |
+| run outcome | `GET …/github/build/:buildId` | `success` / `success` |
+| APK download | `GET …/github/build/:buildId/apk` | HTTP 200, 3 189 843 bytes, valid ZIP with `AndroidManifest.xml`, 422 entries |
+| logs | `GET …/github/build/:buildId/logs` | 81 397 characters of real job text containing `BUILD SUCCESSFUL` |
+
+A `workflow_dispatch` workflow is only registered by GitHub when it exists on the
+repository's **default** branch. Publishing to the build branch alone left
+`GET /actions/workflows` at `0`, so dispatch answered `404`. A publish therefore
+also installs the managed workflow on the default branch, and skips the write
+when the same blob is already there, so a project's default branch is not
+rewritten on every sync.
+
+**GITHUB PUBLISH / DISPATCH E2E: PASS.**
 
 The browser never receives `GITHUB_TOKEN`. The artifact route validates that the
 requested id belongs to the latest run of the configured repository before

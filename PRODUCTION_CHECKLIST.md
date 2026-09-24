@@ -60,7 +60,7 @@ on that machine's toolchain.
 | APK secret scan | PASS | read with the in-process ZIP reader (no system `unzip`); 178 of 422 entries scanned; clean; a key planted inside an APK was detected and masked, never echoed in full |
 | Failed build reports no artifact | PASS | broken Kotlin source → `status: failed`, `apk: null`, zero `apk produced` log lines |
 | Emulator preview | NOT AVAILABLE | no emulator, no KVM; endpoint reports `ANDROID PREVIEW: NOT AVAILABLE` |
-| CI APK workflow | NOT TESTED | `.github/workflows/build-apk.yml` is written but has not run here |
+| CI APK workflow | PASS | `.github/workflows/android-build.yml` dispatched on a GitHub-hosted runner; job `success`, artifacts `app-debug-apk` (3 189 843 bytes) and `test-reports` |
 
 ## Operations
 
@@ -69,10 +69,10 @@ on that machine's toolchain.
 | Docker Compose stack | PASS | builds and starts; verified with a real container |
 | Sandbox image | PASS | built and ran isolation checks |
 | Secret scan in CI | PASS | the workflow's own scan steps were executed here against this tree; they now pass, and were checked to still catch planted literal secrets while ignoring `$VAR` references |
-| GitHub Actions workflows | NOT TESTED | valid YAML (parsed with `js-yaml`), correct `master` trigger and locally executed scan steps; still never dispatched on a real runner |
-| GitHub workspace publish | PASS (unit) / BLOCKED (live) | the Git Data API sequence, `base_tree` preservation and managed-workflow install are asserted against a local HTTP server (`CASE 3`); a real publish to `rasonjonathan6-coder/app` is refused with `403` by the read-only installation token, and the route reports that verbatim instead of claiming a publish |
-| GitHub workflow dispatch | PASS (unit) / BLOCKED (live) | a refused publish aborts before any commit (`CASE 3b`) and dispatch is skipped with the 403 reason; `GET /api/system/github` reports `canWrite: false`, probed with a real dangling-blob write |
-| GitHub write capability probe | PASS | `canWrite` distinguishes a read-only credential from a writable one; verified live as `false` |
+| GitHub Actions workflows | PASS | five workflows valid YAML; `android-build.yml` dispatched on a real runner and the job ran to `success` (JDK, Android SDK, tests, `assembleDebug`, APK locate, artifact upload) |
+| GitHub workspace publish | PASS (live) | `POST /api/projects/:id/github/sync` returned HTTP 200 pushing 15 files to `rasonjonathan6-coder/app` (commit `8a9eb825b323…`) and installed the managed workflow on the default branch; the Git Data sequence, `base_tree` preservation and install are also asserted in `CASE 3`/`CASE 3c` |
+| GitHub workflow dispatch | PASS (live) | `POST /api/projects/:id/github/build` returned HTTP 202, `status: queued`; run `36030411740` reached `success`; the APK (3 189 843 bytes) and the 81 KB run log were fetched back through My AI Studio's own routes |
+| GitHub write capability probe | PASS | `canWrite` distinguishes a read-only credential from a writable one; verified live as `true` |
 | Oracle Cloud deployment | NOT TESTED | no Oracle access; see `ORACLE_SETUP.md` |
 | Cloudflare Pages deployment | NOT TESTED | no Cloudflare access; see `CLOUDFLARE_SETUP.md` |
 | Supabase connection | NOT TESTED | no Supabase project; uses local PostgreSQL |

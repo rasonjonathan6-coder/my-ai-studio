@@ -174,6 +174,25 @@ belongs to the latest run of the *configured* repository before streaming;
 otherwise an id from any other repository would be a proxy for the server's
 token.
 
+### Dispatching a workflow_dispatch workflow
+
+GitHub only registers a `workflow_dispatch` workflow that exists on the
+repository's **default** branch. A publish that writes the managed workflow only
+to the build branch (`my-ai-studio-build`) leaves `GET /actions/workflows` at
+`total_count: 0`, and every dispatch of it answers `404 Not Found` even though
+the file is plainly in the build branch. `syncWorkspaceToRepo` therefore also
+installs the managed workflow on the default branch. The write is skipped when a
+blob with the same content already exists, so repeated publishes do not pile
+commits onto a project's main branch. `SyncResult` reports
+`workflowOnDefaultBranch`, and a default-branch failure leaves publishing itself
+successful (`defaultBranchError` explains why dispatch would not work).
+
+Also note that GitHub's `/actions/runs/:id/logs` endpoint returns a **zip** of
+one `.txt` per job, not text. Returning the byte count as if it were a log
+description is not the log; `extractRunLogText` unpacks the archive in-process
+using the same reader as the APK path and returns the real redacted text,
+refusing non-archives.
+
 Do not render a bare environment-variable name in frontend code. The secret
 guard in `.github/workflows/build.yml` fails the build when the literal strings
 `sk-or-`, `OPENROUTER_API_KEY`, `DATABASE_URL` or `JWT_SECRET` appear anywhere in

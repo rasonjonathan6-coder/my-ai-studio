@@ -56,6 +56,7 @@ jobs:
           echo "$CMDLINE_TOOLS_SHA256  /tmp/cmdline-tools.zip" | sha256sum -c -
           rm -rf /tmp/cmdline-tools-unpack "$ANDROID_SDK_ROOT/cmdline-tools/latest"
           unzip -qq /tmp/cmdline-tools.zip -d /tmp/cmdline-tools-unpack
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
           mv /tmp/cmdline-tools-unpack/cmdline-tools "$ANDROID_SDK_ROOT/cmdline-tools/latest"
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
 

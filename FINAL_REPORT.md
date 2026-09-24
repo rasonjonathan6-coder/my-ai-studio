@@ -28,14 +28,16 @@ inferred from intent. Every status is one of:
 | AGENT LOOP | PASS | live run: reading -> editing -> testing -> building -> completed; code change and APK independently verified |
 | OPENHANDS | NOT AVAILABLE | no OpenHands agent-server endpoint reachable from this environment |
 | DOCKER | PASS | backend image built; container ran; full smoke suite executed inside it; sandbox runs as uid 1000, cannot reach `169.254.169.254`, and legitimate egress still works |
-| GITHUB ACTIONS | NOT TESTED | four workflows written; never dispatched on a runner |
+| GITHUB ACTIONS (workflows) | NOT TESTED | four workflows written and YAML-valid; never dispatched on a runner |
+| GITHUB PUBLISH / DISPATCH | PASS (unit) / BLOCKED (live) | Git Data API publish sequence, `base_tree` preservation and managed-workflow install asserted against a local HTTP server; live publish to `rasonjonathan6-coder/app` refused `403` by a read-only credential, reported verbatim |
+| GITHUB WRITE PROBE | PASS | `canWrite` in `/api/system/github` distinguishes a read-only credential from a writable one via a real dangling-blob write; verified live as `false` |
 | ANDROID SDK | PASS (host) | build-tools 34.0.0, platform-tools, adb on the host |
 | ANDROID BUILD | PASS | `./gradlew test` and `./gradlew assembleDebug` ran for real |
 | APK | PASS | each template built a real `app-debug.apk`; the APK currently shipped in `release/` is 3 189 843 bytes, SHA-256 `c8fa61b9654c84e1eed5281fbe163383916806cb179b53a82cdd79d2138c2396` |
 | APK INSPECTION | PASS | real `aapt2` + `apksigner`: package/version/min-target read from the APK; signature verified as debug-signed with the v2 scheme |
-| APK SECURITY SCAN | PASS | archive unzipped and pattern-scanned; a planted key was detected and masked, and the clean templates report `clean` |
+| APK SECURITY SCAN | PASS | archive read with the in-process ZIP reader (no `unzip` binary needed) and pattern-scanned: 178 text-like entries of 422; a planted key inside an APK was detected and masked, and never echoed |
 | ANDROID EMULATOR | NOT AVAILABLE | no emulator, no `/dev/kvm`; `adb devices` is empty |
-| EXPORT | PASS | project ZIP produced with exclusions applied; a planted `.env` and `credentials.json` were both absent from the archive |
+| EXPORT | PASS | project ZIP written by an in-process ZIP writer (no system `zip` dependency); the downloaded archive opens in Python's `zipfile` (`testzip` clean), carries 15 files and no secret-bearing path; a planted `.env` and `credentials.json` stay out |
 | RELEASE ARTIFACTS | PASS | `release/` rebuilt from HEAD `70a10d4` with `git archive`, docs, deployment files and a real APK; all 25 SHA-256 checksums verify |
 | PRODUCTION READINESS | PARTIAL | see the degraded-capability section below |
 
@@ -222,14 +224,66 @@ returns `ANDROID PREVIEW: NOT AVAILABLE`. There is no static screenshot or
 substituted image anywhere in this path. The service is written so a real
 emulation host can be attached later without reshaping the API.
 
-### GITHUB ACTIONS — NOT TESTED
+### GITHUB ACTIONS — NOT TESTED (workflows) / BLOCKED (live publish)
 
 Four workflows exist and are real: `test.yml`, `build.yml`, `build-apk.yml`,
-`security.yml`. They checkout, install, lint, test, build and upload artifacts,
-and they fail when the underlying step fails. The APK job verifies that
-`app/build/outputs/apk/debug/app-debug.apk` exists before uploading it and
-fails the job when it does not. None of them has been dispatched on a GitHub
-runner from this environment, so their status is NOT TESTED rather than PASS.
+`security.yml`, plus the managed `android-build.yml` the server installs into a
+target repository. They checkout, install, lint, test, build and upload
+artifacts, and they fail when the underlying step fails. The APK job verifies
+that `app/build/outputs/apk/debug/app-debug.apk` exists before uploading it and
+fails the job when it does not. All five parse cleanly with `js-yaml`.
+
+The `android-build.yml` steps were executed by hand against the real workspace
+that holds a built APK, and they behave as written: the APK-locate step found
+`./app/build/outputs/apk/debug/app-debug.apk` (3 189 843 bytes), the `PK` header
+check passed, and `sha256sum` returned
+`e1dacaeeb9114b1e212efa6702e45d94bcd73e4f92351a08158aab987ff36380`. The
+secret-scan step was run against a directory with a planted `sk-or-v1-…` literal
+and correctly printed `SECURITY FAILED`.
+
+None of the workflows has been dispatched on a GitHub runner from this
+environment, so their runner status is NOT TESTED rather than PASS.
+
+### GITHUB PUBLISH AND DISPATCH — BLOCKED BY A READ-ONLY CREDENTIAL
+
+The integration that publishes a workspace and dispatches the build is
+implemented and unit-verified:
+
+- `syncWorkspaceToRepo` creates one blob per file, builds a tree over the head
+  commit's tree as `base_tree` (so unaffected files survive a sparse publish),
+  creates a commit parented on the head, and moves the branch. The managed
+  workflow is written into the same commit.
+- `backend/tests/githubBuilds.test.ts` CASE 3 asserts the exact request sequence
+  against a local HTTP server and checks the `base_tree` argument and the three
+  blob paths; CASE 3b asserts that a `403` on blob creation aborts before any
+  tree or commit is attempted.
+- `GET /api/system/github` gained `canWrite`, probed by creating a blob that
+  nothing references. This is a real write, but it cannot touch a branch, a
+  commit or the working tree, and GitHub garbage-collects it.
+
+The live path cannot complete here. The credential is an installation token with
+read-only access to `rasonjonathan6-coder/app`:
+
+```
+GET  /repos/rasonjonathan6-coder/app              -> 200
+POST /repos/rasonjonathan6-coder/app/git/blobs    -> 403 Resource not accessible by integration
+```
+
+`GET /api/system/github` therefore reports `canWrite: false`, and
+`POST /api/projects/:id/github/build` answers with the refusal verbatim:
+
+```
+{ "error": "the project could not be published to GitHub, so no workflow was dispatched",
+  "detail": "blob creation failed: 403 Resource not accessible by integration" }
+```
+
+That is the correct, honest outcome — no run was started and no publish was
+claimed. Granting the credential `contents: write` and `actions: write` (or
+supplying a `GITHUB_TOKEN` with them) is the only remaining step; the capability
+probe will then report `canWrite: true` and the same routes publish and dispatch
+without further code changes.
+
+**GITHUB PUBLISH / DISPATCH E2E: BLOCKED (read-only credential).**
 
 ### ORACLE CLOUD DEPLOYMENT — NOT TESTED
 

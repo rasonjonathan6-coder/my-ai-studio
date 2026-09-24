@@ -396,9 +396,52 @@ export interface GithubStatus {
   connected: boolean;
   repo: string | null;
   tokenConfigured: boolean;
+  /** Which credential shape the server holds. Never the credential itself. */
+  credential: 'app' | 'token' | 'none';
+  /** The workflow the build endpoint dispatches. */
+  workflow: string;
   detail: string | null;
   latestRun: GithubRun | null;
   latestArtifacts: GithubArtifact[];
+  /**
+   * Whether the server's credential can publish. Null when the probe was
+   * inconclusive. A false here explains why publishing and dispatch fail even
+   * though the repository probes as reachable.
+   */
+  canWrite: boolean | null;
+}
+
+/** Status of a build dispatched to GitHub Actions from a project. */
+export type GithubBuildStatus =
+  | 'queued' | 'running' | 'testing' | 'building'
+  | 'success' | 'failed' | 'cancelled' | 'timeout'
+  | 'not_configured' | 'blocked';
+
+export interface GithubBuild {
+  id: string;
+  projectId: string;
+  repo: string;
+  workflow: string;
+  ref: string;
+  runId: number | null;
+  runNumber: number | null;
+  htmlUrl: string | null;
+  status: GithubBuildStatus;
+  conclusion: string | null;
+  apk: {
+    name: string;
+    sizeBytes: number;
+    sha256: string;
+    packageName: string | null;
+    versionName: string | null;
+    versionCode: string | null;
+    valid: boolean;
+  } | null;
+  error: string | null;
+  logTail: string;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
 }
 
 export interface WsEvent {

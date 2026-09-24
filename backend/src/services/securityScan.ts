@@ -1,12 +1,14 @@
 /**
  * Secret scanner. Scans real project files and, when available, the contents of
- * a real APK (via unzip listing + string extraction). Reported matches are
- * always masked so the scanner never becomes the leak it is looking for.
+ * a real APK. The APK is read with the in-process ZIP reader rather than the
+ * system `unzip` binary, so the archive is scanned even on images where `unzip`
+ * is absent. Reported matches are always masked so the scanner never becomes the
+ * leak it is looking for.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import { WorkspaceService } from './workspace.ts';
+import { readZipEntries, readZipEntry } from '../lib/apkZip.ts';
 
 export interface Finding {
   pattern: string;
@@ -161,26 +163,36 @@ function isPlaceholder(value: string): boolean {
 
 async function scanApk(apkPath: string): Promise<{ scanned: boolean; note: string | null; findings: Finding[] }> {
   const findings: Finding[] = [];
+  let archive: Buffer;
   try {
-    await fs.access(apkPath);
+    const stat = await fs.stat(apkPath);
+    // An APK is a ZIP; refuse anything implausibly large before reading it in.
+    if (stat.size > 512 * 1024 * 1024) {
+      return { scanned: false, note: `APK is ${stat.size} bytes, above the scan limit`, findings };
+    }
+    archive = await fs.readFile(apkPath);
   } catch {
     return { scanned: false, note: `APK not found at ${apkPath}`, findings };
   }
 
-  // Real extraction: list entries, then read text-ish entries and search them.
-  const listing = await runCapture('unzip', ['-Z1', apkPath], 60000);
-  if (!listing.ok) {
-    return { scanned: false, note: `unzip unavailable or failed: ${listing.stderr.slice(0, 200)}`, findings };
+  // The contents are read with the in-process ZIP reader rather than the system
+  // `unzip` binary, which is absent from slim images and would leave the APK
+  // unscanned while still reporting a clean project scan.
+  const read = readZipEntries(archive);
+  if (!read.ok) {
+    return { scanned: false, note: `APK could not be read as an archive: ${read.error ?? 'unknown error'}`, findings };
   }
-  const entries = listing.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+
+  const entries = read.entries.map((e) => e.name);
   const textish = entries.filter((e) => /\.(xml|properties|txt|json|js|kt|java|dex)$/i.test(e)).slice(0, 400);
 
   for (const entry of textish) {
-    const extracted = await runCapture('unzip', ['-p', apkPath, entry], 60000);
-    if (!extracted.ok && extracted.stdout.length === 0) continue;
-    // .dex and binary XML contain compressed strings; search byte sequences we
-    // can actually see so we do not claim to have parsed binary formats.
-    const haystack = extracted.stdout;
+    const bytes = readZipEntry(archive, entry);
+    if (!bytes || bytes.length === 0) continue;
+    // `.dex` and binary XML hold compressed strings; search the readable byte
+    // sequences rather than claiming to have decoded binary formats. latin1
+    // keeps every byte mapped so no match is dropped by UTF-8 replacement.
+    const haystack = bytes.toString('latin1');
     for (const def of PATTERNS) {
       const re = new RegExp(def.re.source, def.re.flags);
       let match: RegExpExecArray | null;
@@ -203,25 +215,4 @@ async function scanApk(apkPath: string): Promise<{ scanned: boolean; note: strin
     note: `scanned ${textish.length} text-like entries out of ${entries.length}`,
     findings,
   };
-}
-
-function runCapture(cmd: string, args: string[], timeoutMs: number): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (d: Buffer) => {
-      if (stdout.length < 8 * 1024 * 1024) stdout += d.toString('latin1');
-    });
-    child.stderr.on('data', (d: Buffer) => (stderr += d.toString('utf8')));
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      resolve({ ok: false, stdout, stderr: err.message });
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({ ok: code === 0, stdout, stderr });
-    });
-  });
 }

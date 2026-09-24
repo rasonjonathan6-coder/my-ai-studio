@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process';
 import { config } from '../config/index.ts';
 import { sha256File } from '../lib/hash.ts';
 import { parseBinaryManifest } from '../lib/axml.ts';
+import { readZipEntries, readZipEntry } from '../lib/apkZip.ts';
 
 export interface ApkInspection {
   path: string;
@@ -81,16 +82,6 @@ async function findBuildTool(name: string): Promise<string | null> {
   return null;
 }
 
-function unzipEntry(apkPath: string, entry: string): Promise<{ ok: boolean; content: Buffer }> {
-  return new Promise((resolve) => {
-    const child = spawn('unzip', ['-p', apkPath, entry], { stdio: ['ignore', 'pipe', 'pipe'] });
-    const chunks: Buffer[] = [];
-    child.stdout.on('data', (d: Buffer) => chunks.push(d));
-    child.on('error', () => resolve({ ok: false, content: Buffer.alloc(0) }));
-    child.on('close', (code) => resolve({ ok: code === 0, content: Buffer.concat(chunks) }));
-  });
-}
-
 export async function inspectApk(apkPath: string): Promise<ApkInspection> {
   const result: ApkInspection = {
     path: apkPath,
@@ -160,22 +151,32 @@ export async function inspectApk(apkPath: string): Promise<ApkInspection> {
   }
 
   // --- ZIP structure + manifest strings (always real, works without SDK) -----
-  const listing = await exec('unzip', ['-Z1', apkPath]);
-  if (listing.ok) {
-    result.toolsUsed.push('unzip');
-    const entries = listing.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
-    result.nativeLibs = entries.filter((e) => e.endsWith('.so'));
-    result.abis = result.abis.length > 0
-      ? result.abis
-      : [...new Set(result.nativeLibs.map((e) => e.split('/').slice(-2)[0]).filter(Boolean))];
-    result.dexFiles = entries.filter((e) => /^classes\d*\.dex$/.test(path.basename(e))).length;
-  } else {
-    result.notes.push(`unzip listing failed: ${listing.stderr.trim().slice(0, 200)}`);
+  // Read with the in-process ZIP reader: the system `unzip` binary is absent from
+  // slim images, and its failure would silently leave the archive unexamined.
+  let entryNames: string[] = [];
+  let apkBuffer: Buffer | null = null;
+  try {
+    apkBuffer = await fs.readFile(apkPath);
+    const read = readZipEntries(apkBuffer);
+    if (read.ok) {
+      entryNames = read.entries.map((e) => e.name);
+      result.toolsUsed.push('zipreader');
+      result.nativeLibs = entryNames.filter((e) => e.endsWith('.so'));
+      result.abis = result.abis.length > 0
+        ? result.abis
+        : [...new Set(result.nativeLibs.map((e) => e.split('/').slice(-2)[0]).filter(Boolean))];
+      result.dexFiles = entryNames.filter((e) => /^classes\d*\.dex$/.test(path.basename(e))).length;
+    } else {
+      result.notes.push(`APK could not be read as an archive: ${read.error ?? 'unknown error'}`);
+    }
+  } catch (err) {
+    result.notes.push(`APK could not be read: ${(err as Error).message.slice(0, 200)}`);
   }
 
-  const manifest = await unzipEntry(apkPath, 'AndroidManifest.xml');
-  if (manifest.ok && manifest.content.length > 0) {
-    const parsed = parseBinaryManifest(manifest.content);
+  const manifestEntry = entryNames.find((e) => e === 'AndroidManifest.xml' || e.endsWith('/AndroidManifest.xml'));
+  const manifestContent = apkBuffer && manifestEntry ? readZipEntry(apkBuffer, manifestEntry) : null;
+  if (manifestContent && manifestContent.length > 0) {
+    const parsed = parseBinaryManifest(manifestContent);
     if (parsed) {
       result.toolsUsed.push('axml');
       // aapt2 output is authoritative when it ran; the parser only fills gaps.
@@ -223,9 +224,7 @@ export async function inspectApk(apkPath: string): Promise<ApkInspection> {
     }
   } else {
     // Presence of META-INF signing files is real evidence, not proof of validity.
-    const signed = result.nativeLibs.length >= 0 && (await exec('unzip', ['-Z1', apkPath])).stdout
-      .split('\n')
-      .some((e) => /^META-INF\/.*\.(RSA|DSA|EC|SF)$/i.test(e.trim()));
+    const signed = entryNames.some((e) => /^META-INF\/.*\.(RSA|DSA|EC|SF)$/i.test(e));
     result.signed = signed ? true : null;
     result.signatureSchemes = signed ? ['v1-or-unknown'] : [];
     result.notes.push('apksigner not available; signature inferred from META-INF entries only (validity NOT verified)');

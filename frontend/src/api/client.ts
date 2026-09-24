@@ -1,7 +1,7 @@
 import type {
   AgentRun, AiAutoProbeResponse, AiModel, AiModelTestResult, AiProviderProbeResult, AiProviderTestResult, AiProvidersResponse,
   BuildResult, CommandHistoryEntry, CommandResult, Conversation,
-  ExportResult, FileEntry, FreePlanEntry, GithubStatus, Message, ModelSummary, PreviewResult, Project, ProviderSelection, SecurityScan, SystemStatus, User,
+  ExportResult, FileEntry, FreePlanEntry, GithubBuild, GithubStatus, Message, ModelSummary, PreviewResult, Project, ProviderSelection, SecurityScan, SystemStatus, User,
 } from './types.ts';
 
 /** Re-exported so callers have a single import site for the contract types. */
@@ -148,10 +148,35 @@ export const api = {
   preview: (id: string) => request<{ preview: PreviewResult }>(`/api/projects/${id}/preview`, { method: 'POST' }),
   exportProject: (id: string) => request<{ export: ExportResult }>(`/api/projects/${id}/export`, { method: 'POST' }),
   artifacts: (id: string) => request<{ artifacts: Array<{ id: string; kind: string; rel_path: string; size_bytes: number; sha256: string; created_at: string }> }>(`/api/projects/${id}/artifacts`),
+
+  // GitHub Actions builds, dispatched and tracked per project.
+  githubBuild: (id: string, input: { repository?: string; branch?: string; workflow?: string; sync?: boolean } = {}) =>
+    request<{ build: GithubBuild; sync: { repo: string; branch: string; commitSha: string | null; filesPushed: number; skipped: string[] } | null }>(
+      `/api/projects/${id}/github/build`, { ...json(input), method: 'POST' },
+    ),
+  githubBuilds: (id: string) => request<{ builds: GithubBuild[] }>(`/api/projects/${id}/github/builds`),
+  githubBuildDetail: (id: string, buildId: string) => request<{ build: GithubBuild }>(`/api/projects/${id}/github/build/${buildId}`),
+  githubBuildCancel: (id: string, buildId: string) =>
+    request<{ build: GithubBuild }>(`/api/projects/${id}/github/build/${buildId}/cancel`, { method: 'POST' }),
+  githubBuildLogs: (id: string, buildId: string) =>
+    request<{ logs: string; remote: string | null; error: string | null }>(`/api/projects/${id}/github/build/${buildId}/logs`),
+  githubSync: (id: string, input: { repository?: string; branch?: string } = {}) =>
+    request<{ sync: { repo: string; branch: string; commitSha: string | null; filesPushed: number; skipped: string[] } }>(
+      `/api/projects/${id}/github/sync`, { ...json(input), method: 'POST' },
+    ),
 };
 
 export function downloadUrl(projectId: string, kind: 'apk' | 'zip' | 'logs'): string {
   return `${API_URL}/api/projects/${projectId}/download/${kind}`;
+}
+
+/**
+ * URL of the APK that GitHub Actions produced for one tracked build. The file
+ * is the real artifact the workflow uploaded, validated server-side; a build
+ * without one answers 404 rather than serving something else.
+ */
+export function githubBuildApkUrl(projectId: string, buildId: string): string {
+  return `${API_URL}/api/projects/${projectId}/github/build/${buildId}/apk`;
 }
 
 /**

@@ -57,7 +57,7 @@ on that machine's toolchain.
 | `assembleDebug` | PASS | APK produced on disk |
 | APK exists and is valid | PASS | `aapt2 dump badging` on the file |
 | APK inspection | PASS | package/version/minSdk/targetSdk/components read from the built APK; values match `aapt2 dump badging` |
-| APK secret scan | PASS | unzipped and grepped; clean; a planted key was detected and masked, and never echoed in full |
+| APK secret scan | PASS | read with the in-process ZIP reader (no system `unzip`); 178 of 422 entries scanned; clean; a key planted inside an APK was detected and masked, never echoed in full |
 | Failed build reports no artifact | PASS | broken Kotlin source → `status: failed`, `apk: null`, zero `apk produced` log lines |
 | Emulator preview | NOT AVAILABLE | no emulator, no KVM; endpoint reports `ANDROID PREVIEW: NOT AVAILABLE` |
 | CI APK workflow | NOT TESTED | `.github/workflows/build-apk.yml` is written but has not run here |
@@ -69,7 +69,10 @@ on that machine's toolchain.
 | Docker Compose stack | PASS | builds and starts; verified with a real container |
 | Sandbox image | PASS | built and ran isolation checks |
 | Secret scan in CI | PASS | the workflow's own scan steps were executed here against this tree; they now pass, and were checked to still catch planted literal secrets while ignoring `$VAR` references |
-| GitHub Actions workflows | NOT TESTED | valid YAML, correct `master` trigger and locally executed scan steps; still never dispatched on a real runner |
+| GitHub Actions workflows | NOT TESTED | valid YAML (parsed with `js-yaml`), correct `master` trigger and locally executed scan steps; still never dispatched on a real runner |
+| GitHub workspace publish | PASS (unit) / BLOCKED (live) | the Git Data API sequence, `base_tree` preservation and managed-workflow install are asserted against a local HTTP server (`CASE 3`); a real publish to `rasonjonathan6-coder/app` is refused with `403` by the read-only installation token, and the route reports that verbatim instead of claiming a publish |
+| GitHub workflow dispatch | PASS (unit) / BLOCKED (live) | a refused publish aborts before any commit (`CASE 3b`) and dispatch is skipped with the 403 reason; `GET /api/system/github` reports `canWrite: false`, probed with a real dangling-blob write |
+| GitHub write capability probe | PASS | `canWrite` distinguishes a read-only credential from a writable one; verified live as `false` |
 | Oracle Cloud deployment | NOT TESTED | no Oracle access; see `ORACLE_SETUP.md` |
 | Cloudflare Pages deployment | NOT TESTED | no Cloudflare access; see `CLOUDFLARE_SETUP.md` |
 | Supabase connection | NOT TESTED | no Supabase project; uses local PostgreSQL |

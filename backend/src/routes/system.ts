@@ -137,9 +137,9 @@ router.get('/system/github', requireAuth, asyncHandler(async (_req, res) => {
 }));
 
 /**
- * Proxies a GitHub Actions artifact through the backend so the token is never
- * handed to the browser. Requires authentication: the route is mounted under
- * the same auth middleware as the rest of the API.
+ * Artifacts of the latest run of the configured repository. Kept for the
+ * read-only status panel; the project-scoped build routes under
+ * /api/projects/:id/github/* are the path the Build Center uses.
  */
 router.get('/system/github/artifacts/:artifactId', requireAuth, asyncHandler(async (req, res) => {
   const raw = String(req.params.artifactId ?? '');

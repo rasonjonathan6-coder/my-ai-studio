@@ -261,3 +261,40 @@ stuck. Migration `003_agent_runs_provider_all.sql` widens both provider columns
 to the full router set. When adding a provider, this constraint list is one of
 the places that must be updated.
 
+A repository that a credential can *read* is not a repository it can *write*. The
+GitHub status probe used to report `AVAILABLE` for a read-only installation token,
+which made the Build Center look healthy right up until a publish was refused with
+`403 Resource not accessible by integration`. `GET /api/system/github` now carries
+`canWrite`, determined by actually creating a blob that nothing references: a real
+write attempt is the only way to tell the two apart, and a dangling blob cannot
+touch a branch, a commit or the working tree (GitHub garbage-collects it). A
+`403`/`404` on that probe means read-only; any other failure leaves `canWrite`
+`null` rather than guessing.
+
+Export used to shell out to the system `zip`/`unzip` binaries, so the whole
+feature was unavailable on any image without them and failed with an opaque
+`500 zip failed: spawn zip ENOENT`. `src/lib/zipWriter.ts` now builds the archive
+in-process (local headers, central directory, EOCD) and `src/services/export.ts`
+walks the workspace itself, so the exclusions are applied to the exact bytes that
+are archived. The finished archive is read back with the production ZIP reader
+before being offered as a download, which turns a writer bug into a clean error
+instead of a corrupt file. Exclusion rules match whole path segments and exact
+stems (`mynode_modules/` and `secretsanta.txt` survive; `node_modules/` and
+`secrets.json` do not), and symlinks are skipped rather than followed out of the
+workspace.
+
+Build steps that locate an APK must refuse a stale one. `assembleDebug` can
+report `BUILD SUCCESSFUL` with every task `UP-TO-DATE` while the APK on disk is
+from an earlier build; the build service compares the artifact's mtime against
+the build start and fails with "predates this build" rather than attaching the
+old file. When validating this path, delete `app/build` first or the honest
+answer is a refusal, not a fresh artifact.
+
+The APK secret scan and APK inspection also used to shell out to `unzip`, so on
+an image without it the archive was never examined while the project scan still
+reported `clean` - a key could ship inside the APK undetected. Both now use
+`readZipEntries`/`readZipEntry` from `src/lib/apkZip.ts`. The scan result
+carries `apkScanned`, and a caller that ignores it is reporting on a scan that
+did not happen; `apkNote` states how many entries were read and why it failed
+when it did.
+

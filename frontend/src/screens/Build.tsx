@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
-import { api, downloadUrl, githubArtifactUrl } from '../api/client.ts';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { api, downloadUrl, githubArtifactUrl, githubBuildApkUrl } from '../api/client.ts';
 import { Card, Empty, StatePill, bytes, when } from '../components/ui.tsx';
-import type { ApkInspection, BuildResult, GithubStatus, SecurityScan, SystemStatus, WsEvent } from '../api/types.ts';
+import type { ApkInspection, BuildResult, GithubBuild, GithubStatus, SecurityScan, SystemStatus, WsEvent } from '../api/types.ts';
 
 interface TestSummary {
   status: string; framework: string | null; command: string | null;
@@ -18,6 +18,10 @@ export function BuildScreen({ projectId, events }: { projectId: string; events: 
   const [busy, setBusy] = useState<{ test?: boolean; build?: boolean; scan?: boolean }>({});
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
+  const [ghBuild, setGhBuild] = useState<GithubBuild | null>(null);
+  const [ghBusy, setGhBusy] = useState(false);
+  const [ghSync, setGhSync] = useState<string | null>(null);
+  const pollRef = useRef<number | null>(null);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -58,7 +62,87 @@ export function BuildScreen({ projectId, events }: { projectId: string; events: 
     }
   }, []);
 
-  useEffect(() => { void loadStatus(); void loadArtifacts(); void loadGithub(); }, [loadStatus, loadArtifacts, loadGithub]);
+  const loadGithubBuild = useCallback(async () => {
+    try {
+      const res = await api.githubBuilds(projectId);
+      // The first entry is the most recent build; keep showing it while it runs.
+      setGhBuild(res.builds[0] ?? null);
+    } catch {
+      setGhBuild(null);
+    }
+  }, [projectId]);
+
+  useEffect(() => { void loadStatus(); void loadArtifacts(); void loadGithub(); void loadGithubBuild(); }, [loadStatus, loadArtifacts, loadGithub, loadGithubBuild]);
+
+  // Poll a running build until it reaches a terminal state. The backend owns the
+  // run; this only re-reads its status and stops when there is nothing more to
+  // wait for.
+  useEffect(() => {
+    const live = ghBuild && !['success', 'failed', 'cancelled', 'timeout', 'not_configured', 'blocked'].includes(ghBuild.status);
+    if (!live) {
+      if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
+      return;
+    }
+    if (pollRef.current) return;
+    pollRef.current = window.setInterval(() => {
+      void (async () => {
+        try {
+          const res = await api.githubBuildDetail(projectId, ghBuild!.id);
+          setGhBuild(res.build);
+        } catch {
+          // A transient poll failure is retried on the next tick.
+        }
+      })();
+    }, 4000);
+    return () => {
+      if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
+    };
+  }, [ghBuild, projectId]);
+
+  const startGithubBuild = async () => {
+    setGhBusy(true);
+    setError(null);
+    setGhSync(null);
+    try {
+      const res = await api.githubBuild(projectId, {});
+      setGhBuild(res.build);
+      if (res.sync) {
+        setGhSync(`published ${res.sync.filesPushed} file(s) to ${res.sync.repo}@${res.sync.branch}${res.sync.commitSha ? ` (${res.sync.commitSha.slice(0, 10)})` : ''}`);
+      }
+      await loadGithub();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setGhBusy(false);
+    }
+  };
+
+  const cancelGithubBuild = async () => {
+    if (!ghBuild) return;
+    setGhBusy(true);
+    try {
+      const res = await api.githubBuildCancel(projectId, ghBuild.id);
+      setGhBuild(res.build);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setGhBusy(false);
+    }
+  };
+
+  const syncOnly = async () => {
+    setGhBusy(true);
+    setError(null);
+    setGhSync(null);
+    try {
+      const res = await api.githubSync(projectId, {});
+      setGhSync(`published ${res.sync.filesPushed} file(s) to ${res.sync.repo}@${res.sync.branch}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setGhBusy(false);
+    }
+  };
 
   // Build and test log frames for this project, streamed live.
   useEffect(() => {
@@ -230,8 +314,16 @@ export function BuildScreen({ projectId, events }: { projectId: string; events: 
       <div style={{ marginTop: 12 }}>
         <Card
           title="GitHub Actions"
-          subtitle="Status of the latest workflow run on the configured repository. CI runs on GitHub; nothing here is simulated."
-          actions={<button className="btn btn-ghost btn-sm" onClick={() => void loadGithub()}>REFRESH</button>}
+          subtitle="Dispatches the real android-build workflow on GitHub. The APK offered for download is the artifact that run uploaded, validated on the server."
+          actions={(
+            <div className="row">
+              <button className="btn btn-ghost btn-sm" onClick={() => void loadGithub()}>REFRESH</button>
+              <button className="btn btn-ghost btn-sm" onClick={() => void syncOnly()} disabled={ghBusy}>PUBLISH CODE</button>
+              <button className="btn btn-primary btn-sm" onClick={() => void startGithubBuild()} disabled={ghBusy}>
+                {ghBusy ? 'WORKING.' : 'BUILD ON GITHUB ACTIONS'}
+              </button>
+            </div>
+          )}
         >
           {!github && <Empty>GitHub integration state could not be read.</Empty>}
           {github && (
@@ -240,17 +332,98 @@ export function BuildScreen({ projectId, events }: { projectId: string; events: 
                 <StatePill value={github.state} />
                 <span className="hint mono">{github.repo ?? 'no repository set'}</span>
               </div>
-              <div className="kv"><span>token on server</span><span>{github.tokenConfigured ? 'present' : 'absent'}</span></div>
+              <div className="kv"><span>credential on server</span><span>{github.tokenConfigured || github.credential === 'app' ? github.credential : 'absent'}</span></div>
+              <div className="kv">
+                <span>publish permission</span>
+                <span>{github.canWrite === true ? 'writable' : github.canWrite === false ? 'read-only' : 'not determined'}</span>
+              </div>
+              <div className="kv"><span>workflow</span><span className="mono">{github.workflow}</span></div>
               {github.detail && <p className="hint" style={{ marginTop: 6 }}>{github.detail}</p>}
-              {github.latestRun ? (
-                <>
+              {github.canWrite === false && (
+                <p className="hint" style={{ marginTop: 8 }}>
+                  GITHUB_READ_ONLY — the credential on the server can read this repository but not write to it, so publishing the workspace and dispatching the workflow will be refused. Grant the token or App <span className="mono">contents: write</span> and <span className="mono">actions: write</span> for this repository.
+                </p>
+              )}
+              {github.state === 'NOT_CONFIGURED' && (
+                <p className="hint" style={{ marginTop: 8 }}>
+                  GITHUB_NOT_CONFIGURED — set GITHUB_REPO on the server (and GITHUB_TOKEN, or GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY + GITHUB_INSTALLATION_ID) to enable this.
+                </p>
+              )}
+
+              {ghSync && <p className="hint" style={{ marginTop: 8 }}>{ghSync}</p>}
+
+              {ghBuild ? (
+                <div style={{ marginTop: 12 }}>
+                  <div className="row">
+                    <StatePill value={ghBuild.status.toUpperCase()} />
+                    <span className="hint mono">
+                      {ghBuild.repo} · {ghBuild.workflow} @ {ghBuild.ref}
+                    </span>
+                  </div>
+                  {ghBuild.runId && (
+                    <>
+                      <div className="kv"><span>run</span><span>#{ghBuild.runNumber ?? ghBuild.runId} (id {ghBuild.runId})</span></div>
+                      <div className="kv"><span>conclusion</span><span>{ghBuild.conclusion ?? 'pending'}</span></div>
+                      {ghBuild.htmlUrl && (
+                        <a className="btn btn-ghost btn-block" style={{ marginTop: 8 }} href={ghBuild.htmlUrl} target="_blank" rel="noreferrer">
+                          Open run on GitHub
+                        </a>
+                      )}
+                    </>
+                  )}
+                  {ghBuild.error && <p className="error-text" style={{ marginTop: 8 }}>{ghBuild.error}</p>}
+
+                  {ghBuild.status === 'success' && ghBuild.apk?.valid ? (
+                    <>
+                      <div className="kv"><span>APK</span><span>{ghBuild.apk.name}</span></div>
+                      <div className="kv"><span>size</span><span>{bytes(ghBuild.apk.sizeBytes)}</span></div>
+                      <div className="kv"><span>sha256</span><span className="mono" style={{ wordBreak: 'break-all' }}>{ghBuild.apk.sha256}</span></div>
+                      <div className="kv"><span>package</span><span>{ghBuild.apk.packageName ?? 'unknown'}</span></div>
+                      <div className="kv"><span>versionName / code</span><span>{ghBuild.apk.versionName ?? '-'} / {ghBuild.apk.versionCode ?? '-'}</span></div>
+                      <a
+                        className="btn btn-primary btn-block"
+                        style={{ marginTop: 10 }}
+                        href={githubBuildApkUrl(projectId, ghBuild.id)}
+                      >
+                        Download APK from GitHub Actions
+                      </a>
+                    </>
+                  ) : ghBuild.status === 'success' ? (
+                    <p className="hint" style={{ marginTop: 8 }}>The run succeeded but no validated APK artifact is attached.</p>
+                  ) : (
+                    <p className="hint" style={{ marginTop: 8 }}>
+                      {['not_configured', 'blocked'].includes(ghBuild.status)
+                        ? 'No workflow was dispatched.'
+                        : 'Waiting for the run to finish. The APK becomes downloadable only after GitHub reports success and the artifact passes validation.'}
+                    </p>
+                  )}
+
+                  {!['success', 'failed', 'cancelled', 'timeout', 'not_configured', 'blocked'].includes(ghBuild.status) && (
+                    <button className="btn btn-ghost btn-block" style={{ marginTop: 8 }} onClick={() => void cancelGithubBuild()} disabled={ghBusy}>
+                      Cancel run
+                    </button>
+                  )}
+
+                  {ghBuild.logTail && (
+                    <details style={{ marginTop: 10 }}>
+                      <summary className="hint">Server-side build log</summary>
+                      <pre className="term" style={{ maxHeight: '32vh', marginTop: 8 }}>{ghBuild.logTail.slice(-8000)}</pre>
+                    </details>
+                  )}
+                </div>
+              ) : (
+                <p className="hint" style={{ marginTop: 8 }}>No build has been dispatched from this project yet.</p>
+              )}
+
+              {github.latestRun && (
+                <details style={{ marginTop: 12 }}>
+                  <summary className="hint">Latest run on the configured repository</summary>
                   <div className="kv"><span>workflow</span><span>{github.latestRun.workflowName ?? github.latestRun.name} #{github.latestRun.runNumber}</span></div>
                   <div className="kv"><span>status</span><span>{github.latestRun.status}{github.latestRun.conclusion ? ` · ${github.latestRun.conclusion}` : ''}</span></div>
                   <div className="kv"><span>branch / event</span><span>{github.latestRun.headBranch} · {github.latestRun.event}</span></div>
                   <div className="kv"><span>commit</span><span className="mono">{github.latestRun.headSha.slice(0, 12)}</span></div>
-                  <a className="btn btn-ghost btn-block" style={{ marginTop: 8 }} href={github.latestRun.htmlUrl} target="_blank" rel="noreferrer">Open run on GitHub</a>
-                  {github.latestArtifacts.length > 0 ? (
-                    <div style={{ marginTop: 10 }}>
+                  {github.latestArtifacts.length > 0 && (
+                    <div style={{ marginTop: 8 }}>
                       <p className="hint">Artifacts from this run</p>
                       {github.latestArtifacts.map((a) => (
                         <div className="kv" key={a.id}>
@@ -259,12 +432,8 @@ export function BuildScreen({ projectId, events }: { projectId: string; events: 
                         </div>
                       ))}
                     </div>
-                  ) : (
-                    <p className="hint" style={{ marginTop: 8 }}>No artifacts attached to the latest run.</p>
                   )}
-                </>
-              ) : (
-                github.state === 'AVAILABLE' && <p className="hint" style={{ marginTop: 8 }}>No workflow run found on the configured repository.</p>
+                </details>
               )}
             </>
           )}

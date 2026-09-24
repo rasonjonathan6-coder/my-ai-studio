@@ -153,6 +153,62 @@ The states are literal, not decorative:
 `AVAILABLE` means the call succeeded, not that a run is green: read
 `latestRun.conclusion` for the outcome. The route never invents a run.
 
+The status also carries `canWrite`. A repository probes green with a read-only
+credential, so the state machine cannot tell "connected" from "can publish". The
+server therefore creates a blob that nothing references - a real write, but one
+that cannot touch a branch, a commit or the working tree, and that GitHub
+garbage-collects. `canWrite: false` means the credential is authenticated but
+unauthorized, and publishing or dispatching will be refused; `null` means the
+probe was inconclusive (no credential, or a network failure).
+
+## Publishing the workspace and dispatching the build
+
+| Route | Behaviour |
+| --- | --- |
+| `POST /api/projects/:id/github/sync` | Publishes the workspace to the configured repository |
+| `POST /api/projects/:id/github/build` | Publishes, then dispatches the workflow and records the run |
+
+Publishing uses the Git Data API, not the contents API, so a whole project lands
+in one commit:
+
+1. read the branch head, and the head commit's tree;
+2. create one blob per file;
+3. create a tree over that commit's tree as `base_tree`, so files not in the
+   workspace are preserved rather than deleted by a sparse publish;
+4. create a commit whose parent is the head, then move the branch to it.
+
+The managed workflow (`.github/workflows/android-build.yml`) is written into the
+same commit, so the repository always holds the workflow that the server
+dispatches. Build output (`.gradle/`, `app/build/`, `node_modules/`, `.git/`,
+APKs) is skipped, and the skip list is reported back in `skipped`.
+
+A refused write stops the sequence before the commit is created: no branch is
+moved, and the route reports `blob creation failed: 403 ...` rather than
+claiming a publish. When publishing fails, `POST .../github/build` answers with
+that reason and dispatches nothing - it does not start a run against a stale
+tree.
+
+## Verification status of the live path
+
+The publishing and dispatching code paths are covered by tests against a local
+HTTP server (`backend/tests/githubBuilds.test.ts`, CASE 3 and 3b) that assert the
+exact request sequence, the `base_tree` argument, and that a refused write
+aborts before any commit.
+
+Running the same path against GitHub itself is currently blocked: the credential
+available to this sandbox is an installation token with read-only access to
+`rasonjonathan6-coder/app`. Reads succeed (`GET /repos/...` -> `200`); writes are
+refused (`POST /repos/.../git/blobs` -> `403 Resource not accessible by
+integration`), so `GET /api/system/github` reports `canWrite: false` and dispatch
+returns the 403 verbatim.
+
+To complete the end-to-end run, grant the credential `contents: write` and
+`actions: write` for the repository - either re-install the GitHub App with those
+permissions, or supply a `GITHUB_TOKEN` that has them. The capability probe will
+then report `canWrite: true` and the same routes will publish and dispatch.
+
+**GITHUB PUBLISH / DISPATCH E2E: BLOCKED (read-only credential).**
+
 The browser never receives `GITHUB_TOKEN`. The artifact route validates that the
 requested id belongs to the latest run of the configured repository before
 downloading, then attaches the token server-side; an id from another repository

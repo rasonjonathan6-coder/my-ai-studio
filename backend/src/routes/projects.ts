@@ -15,6 +15,11 @@ import { runTests } from '../services/tests.ts';
 import { getBuild, latestApk, listBuilds, runBuild } from '../services/build.ts';
 import { exportZip } from '../services/export.ts';
 import { scanProject } from '../services/securityScan.ts';
+import {
+  cancelGithubBuild, getGithubBuild, githubApkPath, listGithubBuilds, startGithubBuild,
+} from '../services/githubBuilds.ts';
+import { fetchRunLogs, credentialKind } from '../services/githubActions.ts';
+import { syncWorkspaceToRepo, type SyncResult } from '../services/githubSync.ts';
 import { previewApk } from '../services/androidPreview.ts';
 import { inspectApk } from '../services/apkInspect.ts';
 import { enqueueAgentRun } from '../agent/loop.ts';
@@ -507,6 +512,156 @@ router.get('/:id/download/logs', asyncHandler(async (req, res) => {
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${project!.slug}-build-logs.txt"`);
   res.send(header + body);
+}));
+
+// ----------------------------- GitHub Actions --------------------------------
+//
+// A build is dispatched on GitHub and then tracked. The project is always loaded
+// through loadOwnedProject first, so a build can only ever be started, read,
+// cancelled or downloaded by the owner of the project. The GitHub credential
+// stays on the server: the browser only ever receives project-scoped ids.
+
+const githubBuildLimiter = rateLimit({ max: config.githubBuildRateLimitMax, keyPrefix: 'github_build' });
+
+const githubBuildSchema = z.object({
+  // Constrained so a request cannot name an arbitrary workflow, repository or
+  // ref pattern; the server still re-checks the workflow against its
+  // configuration before dispatching.
+  repository: z.string().regex(/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/).max(140).optional(),
+  branch: z.string().regex(/^[A-Za-z0-9._/-]{1,120}$/).optional(),
+  workflow: z.string().max(120).optional(),
+  // Publishes the workspace to the repository before dispatching. On by default
+  // because a runner checks out the repository, not this server, so a build of
+  // unsynced code would not build what the user sees.
+  sync: z.boolean().optional(),
+});
+
+router.post('/:id/github/build', githubBuildLimiter, asyncHandler(async (req, res) => {
+  const project = await loadOwnedProject(req);
+  const body = validate(githubBuildSchema, req.body ?? {});
+
+  // Publish first so the run builds the current workspace rather than whatever
+  // was in the repository before. Skipped when there is no repository or no
+  // credential, so the tracking row can report not_configured precisely instead
+  // of failing on a publish that could never have worked.
+  const effectiveRepo = body.repository || config.githubRepo;
+  let sync: SyncResult | null = null;
+  if (body.sync !== false && effectiveRepo && credentialKind() !== 'none') {
+    sync = await syncWorkspaceToRepo({
+      projectId: project!.id,
+      repo: body.repository,
+      branch: body.branch,
+      message: `My AI Studio: build ${project!.slug} (${new Date().toISOString()})`,
+    });
+    await audit({
+      userId: req.user!.id, projectId: project!.id, action: 'github.sync',
+      outcome: sync.ok ? 'ok' : 'failed', ip: req.ip ?? null,
+      detail: { repo: sync.repo, branch: sync.branch, files: sync.filesPushed },
+    });
+    if (!sync.ok) {
+      // A failed publish is a real blocker: say so instead of dispatching a run
+      // that would build stale code.
+      logger.warn('github sync failed before build', { projectId: project!.id, error: sync.error ?? null });
+      res.status(502).json({
+        error: 'the project could not be published to GitHub, so no workflow was dispatched',
+        detail: sync.error ?? null,
+        skipped: sync.skipped.slice(0, 50),
+      });
+      return;
+    }
+  }
+
+  const build = await startGithubBuild({
+    projectId: project!.id,
+    ownerId: req.user!.id,
+    repo: body.repository ?? sync?.repo,
+    branch: body.branch ?? sync?.branch,
+    workflow: body.workflow,
+  });
+  await audit({
+    userId: req.user!.id, projectId: project!.id, action: 'github.build',
+    outcome: build.status, ip: req.ip ?? null,
+    detail: { repo: build.repo, runId: build.runId, workflow: build.workflow },
+  });
+  // 202: the run is tracked, not finished. The status field says what actually
+  // happened, including not_configured and blocked.
+  res.status(202).json({ build, sync: sync ? { ...sync, skipped: sync.skipped.slice(0, 50) } : null });
+}));
+
+/** Publishes the workspace to GitHub without dispatching a workflow. */
+router.post('/:id/github/sync', githubBuildLimiter, asyncHandler(async (req, res) => {
+  const project = await loadOwnedProject(req);
+  const body = validate(githubBuildSchema, req.body ?? {});
+  const sync = await syncWorkspaceToRepo({
+    projectId: project!.id, repo: body.repository, branch: body.branch,
+    message: `My AI Studio: sync ${project!.slug}`,
+  });
+  await audit({
+    userId: req.user!.id, projectId: project!.id, action: 'github.sync',
+    outcome: sync.ok ? 'ok' : 'failed', ip: req.ip ?? null,
+    detail: { repo: sync.repo, branch: sync.branch, files: sync.filesPushed },
+  });
+  if (!sync.ok) {
+    res.status(502).json({ error: sync.error ?? 'sync failed', sync: { ...sync, skipped: sync.skipped.slice(0, 50) } });
+    return;
+  }
+  res.json({ sync: { ...sync, skipped: sync.skipped.slice(0, 50) } });
+}));
+
+router.get('/:id/github/builds', asyncHandler(async (req, res) => {
+  const project = await loadOwnedProject(req);
+  res.json({ builds: await listGithubBuilds(project!.id) });
+}));
+
+router.get('/:id/github/build/:buildId', asyncHandler(async (req, res) => {
+  const project = await loadOwnedProject(req);
+  const build = await getGithubBuild(req.params.buildId!, project!.id);
+  if (!build) throw new HttpError(404, 'github build not found', 'github_build_not_found');
+  res.json({ build });
+}));
+
+router.post('/:id/github/build/:buildId/cancel', asyncHandler(async (req, res) => {
+  const project = await loadOwnedProject(req);
+  const result = await cancelGithubBuild(req.params.buildId!, project!.id);
+  if (!result.ok) throw new HttpError(409, result.error ?? 'cancel failed', 'github_cancel_failed');
+  await audit({ userId: req.user!.id, projectId: project!.id, action: 'github.cancel', outcome: 'ok', ip: req.ip ?? null, detail: { buildId: req.params.buildId } });
+  const build = await getGithubBuild(req.params.buildId!, project!.id);
+  res.json({ build });
+}));
+
+router.get('/:id/github/build/:buildId/logs', asyncHandler(async (req, res) => {
+  const project = await loadOwnedProject(req);
+  const build = await getGithubBuild(req.params.buildId!, project!.id);
+  if (!build) throw new HttpError(404, 'github build not found', 'github_build_not_found');
+  if (!build.runId) {
+    // No run has been assigned yet, so there is no remote log to fetch. The
+    // local tail is everything that exists at this point.
+    res.json({ logs: build.logTail, remote: null });
+    return;
+  }
+  const remote = await fetchRunLogs(build.repo, build.runId);
+  res.json({ logs: build.logTail, remote: remote.ok ? remote.text : null, error: remote.ok ? null : remote.error ?? null });
+}));
+
+/**
+ * Serves the APK that GitHub Actions actually produced. The bytes come from the
+ * artifact download, were validated as a real APK, and were written to storage
+ * under this project. Nothing is renamed or synthesised: a build without a
+ * verified APK answers 404.
+ */
+router.get('/:id/github/build/:buildId/apk', asyncHandler(async (req, res) => {
+  const project = await loadOwnedProject(req);
+  const buildId = req.params.buildId!;
+  const build = await getGithubBuild(buildId, project!.id);
+  if (!build) throw new HttpError(404, 'github build not found', 'github_build_not_found');
+  if (build.status !== 'success' || !build.apk?.valid) {
+    throw new HttpError(404, `no verified APK for this build (status ${build.status})`, 'github_apk_unavailable');
+  }
+  const apkPath = await githubApkPath(buildId, project!.id);
+  if (!apkPath) throw new HttpError(404, 'the APK for this build is no longer on disk', 'github_apk_missing');
+  await audit({ userId: req.user!.id, projectId: project!.id, action: 'github.download.apk', ip: req.ip ?? null, detail: { buildId, runId: build.runId } });
+  res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+  res.download(apkPath, build.apk.name);
 }));
 
 export default router;

@@ -1,25 +1,85 @@
 /**
- * Export service. Produces a real ZIP of the project workspace using the
- * system zip binary with explicit exclusions, then verifies the archive by
- * re-reading its entry list and checking that no secret-bearing paths slipped in.
+ * Export service. Produces a real ZIP of the project workspace.
+ *
+ * The archive is assembled in-process by the ZIP writer rather than by shelling
+ * out to a system `zip` binary: the binary is absent from slim images, and its
+ * failure produced an opaque 500. Files are walked here so exclusions are
+ * applied to the same data that is archived, and the result is then re-read with
+ * the production ZIP reader to confirm no secret-bearing path slipped in.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import { WorkspaceService } from './workspace.ts';
-import { sha256File, formatBytes } from '../lib/hash.ts';
+import { sha256Hex, formatBytes } from '../lib/hash.ts';
 import { query } from '../db/pool.ts';
+import { writeZip, type ZipSourceEntry } from '../lib/zipWriter.ts';
+import { readZipEntries } from '../lib/apkZip.ts';
 
-const EXCLUDED_PATTERNS = [
-  '.env', '.env.*', '*.env',
-  'node_modules/*', '*/.git/*', '.git/*',
-  'build/*', '*/build/*', 'dist/*', '*/dist/*',
-  '.gradle/*', '*/.gradle/*',
-  '.cache/*', '*/.cache/*',
-  '*.keystore', '*.jks', '*.p12', '*.pem', '*.key',
-  '*secrets*', '*credentials*', '*.apk', '*.aab',
-  'coverage/*', '*/.next/*', '*/.venv/*', '*.log',
-];
+/**
+ * Paths never written to the archive. Matched as whole path segments so that
+ * `mynode_modules` is kept while `node_modules` is dropped, and as extensions so
+ * that a key file nested anywhere is excluded.
+ */
+const EXCLUDED_SEGMENTS = new Set([
+  'node_modules', '.git', 'build', 'dist', '.gradle', '.cache', '.next', '.venv',
+  'coverage', '__pycache__', '.idea', '.kotlin',
+]);
+const EXCLUDED_EXTENSIONS = new Set(['.keystore', '.jks', '.p12', '.pem', '.key', '.apk', '.aab', '.log']);
+const EXCLUDED_NAMES = new Set(['.env', '.envrc', '.DS_Store']);
+// `secrets.txt` and `credentials.json` are excluded on their stem, whatever the
+// extension, so a renamed dump is still withheld.
+const EXCLUDED_STEMS = /^(secrets?|credentials?)$/i;
+
+/** Whether a workspace-relative path may appear in the export. */
+export function isExportable(relPath: string): boolean {
+  const segments = relPath.split('/');
+  const base = segments[segments.length - 1];
+  if (segments.some((s) => EXCLUDED_SEGMENTS.has(s))) return false;
+  if (EXCLUDED_NAMES.has(base)) return false;
+  if (/^\.env(\.|$)/.test(base)) return false;
+  if (EXCLUDED_EXTENSIONS.has(path.extname(base).toLowerCase())) return false;
+  return !EXCLUDED_STEMS.test(path.parse(base).name);
+}
+
+/** Single-file guard: an oversized workspace must not exhaust memory. */
+const MAX_FILE_BYTES = 64 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 512 * 1024 * 1024;
+
+/** Walks the workspace and returns the entries the archive may contain. */
+async function collectEntries(root: string): Promise<{ entries: ZipSourceEntry[]; skipped: number }> {
+  const entries: ZipSourceEntry[] = [];
+  let skipped = 0;
+  let total = 0;
+
+  const walk = async (dir: string, prefix: string): Promise<void> => {
+    const items = await fs.readdir(dir, { withFileTypes: true });
+    for (const item of items.sort((a, b) => a.name.localeCompare(b.name))) {
+      const rel = prefix ? `${prefix}/${item.name}` : item.name;
+      if (!isExportable(rel)) continue;
+      const abs = path.join(dir, item.name);
+      if (item.isSymbolicLink()) {
+        // Symlinks could point outside the workspace; never follow them.
+        skipped += 1;
+        continue;
+      }
+      if (item.isDirectory()) {
+        await walk(abs, rel);
+        continue;
+      }
+      if (!item.isFile()) continue;
+      const stat = await fs.stat(abs);
+      if (stat.size > MAX_FILE_BYTES || total + stat.size > MAX_TOTAL_BYTES) {
+        skipped += 1;
+        continue;
+      }
+      total += stat.size;
+      entries.push({ name: rel, content: await fs.readFile(abs), mtime: stat.mtime });
+    }
+  };
+
+  await walk(root, '');
+  return { entries, skipped };
+}
 
 export interface ZipResult {
   ok: boolean;
@@ -32,35 +92,9 @@ export interface ZipResult {
   error: string | null;
 }
 
-function runZip(cwd: string, args: string[], timeoutMs = 300000): Promise<{ ok: boolean; stdout: string; stderr: string; code: number | null }> {
-  return new Promise((resolve) => {
-    const child = spawn('zip', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (d: Buffer) => (stdout += d.toString('utf8')));
-    child.stderr.on('data', (d: Buffer) => (stderr += d.toString('utf8')));
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      resolve({ ok: false, stdout, stderr: err.message, code: null });
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({ ok: code === 0, stdout, stderr, code });
-    });
-  });
-}
-
-function runUnzipList(zipPath: string): Promise<{ ok: boolean; entries: string[]; stderr: string }> {
-  return new Promise((resolve) => {
-    const child = spawn('unzip', ['-Z1', zipPath], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (d: Buffer) => (stdout += d.toString('utf8')));
-    child.stderr.on('data', (d: Buffer) => (stderr += d.toString('utf8')));
-    child.on('error', (err) => resolve({ ok: false, entries: [], stderr: err.message }));
-    child.on('close', (code) => resolve({ ok: code === 0, entries: stdout.split('\n').map((l) => l.trim()).filter(Boolean), stderr }));
-  });
+/** Re-runs the exclusion rules over the finished archive as a cross-check. */
+function findLeaks(entryNames: string[]): string[] {
+  return entryNames.filter((name) => !isExportable(name));
 }
 
 export async function exportZip(input: { projectId: string; ownerId: string }): Promise<ZipResult> {
@@ -70,33 +104,43 @@ export async function exportZip(input: { projectId: string; ownerId: string }): 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const zipPath = path.join(storage, `project-${stamp}.zip`);
 
-  const args = ['-r', '-q', zipPath, '.', ...EXCLUDED_PATTERNS.flatMap((p) => ['-x', p])];
-  const result = await runZip(ws.root, args);
-
-  if (!result.ok && !(await fs.stat(zipPath).catch(() => null))) {
+  let archive: Buffer;
+  let entryCount: number;
+  try {
+    const { entries, skipped } = await collectEntries(ws.root);
+    const written = writeZip(entries);
+    archive = written.buffer;
+    entryCount = written.entryCount;
+    // A workspace with nothing exportable is an empty archive; the leak check
+    // below still runs and reports honestly.
+    void skipped;
+  } catch (err) {
     return {
       ok: false, zipPath: null, relPath: null, sizeBytes: 0, sha256: null, entryCount: 0,
-      excludedEntries: [], error: `zip failed: ${result.stderr.trim().slice(0, 400) || `exit code ${result.code}`}`,
+      excludedEntries: [], error: `zip failed: ${(err as Error).message.slice(0, 400)}`,
     };
   }
 
-  const listing = await runUnzipList(zipPath);
-  const stat = await fs.stat(zipPath);
-  const digest = await sha256File(zipPath);
+  await fs.writeFile(zipPath, archive);
 
-  // Verify exclusions held: these paths must not be inside the archive.
-  const leaks = listing.entries.filter((entry) => {
-    const base = path.basename(entry);
-    return base === '.env' || /^\.env\./.test(base) || /\.(keystore|jks|p12|pem|key)$/i.test(base) ||
-      /(^|\/)(node_modules|\.git)\//.test(entry) || /secrets?\.|credentials?\./i.test(base);
-  });
+  // Read the archive back with the production reader: this catches a writer bug
+  // that would have produced an unopenable download.
+  const readBack = readZipEntries(archive);
+  if (!readBack.ok) {
+    return {
+      ok: false, zipPath: null, relPath: null, sizeBytes: 0, sha256: null, entryCount: 0,
+      excludedEntries: [], error: `zip failed verification: ${readBack.error ?? 'unreadable archive'}`,
+    };
+  }
 
+  const digest = sha256Hex(archive);
+  const leaks = findLeaks(readBack.entries.map((e) => e.name));
   const storedRel = `artifacts/${path.basename(zipPath)}`;
 
   if (leaks.length === 0) {
     await query(
       `INSERT INTO artifacts (project_id, owner_id, kind, rel_path, size_bytes, sha256) VALUES ($1, $2, 'zip', $3, $4, $5)`,
-      [input.projectId, input.ownerId, storedRel, stat.size, digest],
+      [input.projectId, input.ownerId, storedRel, archive.length, digest],
     );
   }
 
@@ -104,13 +148,13 @@ export async function exportZip(input: { projectId: string; ownerId: string }): 
     ok: leaks.length === 0,
     zipPath,
     relPath: storedRel,
-    sizeBytes: stat.size,
+    sizeBytes: archive.length,
     sha256: digest,
-    entryCount: listing.entries.length,
+    entryCount,
     excludedEntries: leaks,
     error: leaks.length > 0
       ? `export aborted: ${leaks.length} excluded path(s) present in archive (${leaks.slice(0, 5).join(', ')})`
-      : result.ok ? null : `zip exited with code ${result.code}`,
+      : null,
   };
 }
 

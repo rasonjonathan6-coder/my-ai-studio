@@ -177,8 +177,26 @@ export const config = {
   // server-side only and is never sent to the browser or written to a log.
   githubToken: env('GITHUB_TOKEN'),
   githubRepo: env('GITHUB_REPO'),
+  // Owner may be given separately so a deployment can accept a repository name
+  // from a project without trusting the browser's idea of the namespace.
+  githubOwner: env('GITHUB_OWNER'),
   githubApiBaseUrl: env('GITHUB_API_BASE_URL', 'https://api.github.com'),
   githubTimeoutMs: int('GITHUB_TIMEOUT_MS', 30000),
+  // GitHub App credentials. When all three are present they take precedence over
+  // GITHUB_TOKEN; a token remains supported so existing deployments keep
+  // working. The private key is never logged and is only used to mint a short
+  // lived installation token in memory.
+  githubAppId: env('GITHUB_APP_ID'),
+  githubAppPrivateKey: env('GITHUB_APP_PRIVATE_KEY'),
+  githubAppInstallationId: env('GITHUB_INSTALLATION_ID'),
+  // Default workflow file the build endpoint dispatches when the request does
+  // not name one. Only names on this allow-list can ever be dispatched, so a
+  // crafted request cannot run an arbitrary file in the repository.
+  githubWorkflow: env('GITHUB_WORKFLOW', 'android-build.yml'),
+  githubWorkflowRef: env('GITHUB_WORKFLOW_REF', ''),
+  githubBuildTimeoutMs: int('GITHUB_BUILD_TIMEOUT_MS', 20 * 60 * 1000),
+  githubBuildPollMs: int('GITHUB_BUILD_POLL_MS', 5000),
+  githubBuildRateLimitMax: int('GITHUB_BUILD_RATE_LIMIT_MAX', 10),
 
   workspaceRoot: path.resolve(env('WORKSPACE_PATH', path.join(process.cwd(), 'workspace-data', 'projects'))),
   storageRoot: path.resolve(env('STORAGE_PATH', path.join(process.cwd(), 'workspace-data', 'storage'))),

@@ -20,7 +20,7 @@ import {
   type ProviderService,
 } from './providers.ts';
 import {
-  PROVIDER_TIERS, freeEligibleModels, observeModel, modelKey,
+  PROVIDER_TIERS, freeEligibleModels, listModels, observeModel, modelKey,
   type ProviderTier,
 } from './modelRegistry.ts';
 import type { ChatFailure, ChatOptions, ChatOutcome, ProviderCapabilities } from './providerClient.ts';
@@ -615,6 +615,33 @@ export class AiProviderRouter {
 
   public recentAttempts(limit = 20): AttemptRecord[] {
     return this.history.slice(-limit);
+  }
+
+  /**
+   * The FREE_ONLY policy as a single decision point, so a caller that talks to
+   * an adapter directly (the provider/model diagnostics) enforces the same rule
+   * as the router instead of bypassing it and spending paid quota. A paid
+   * provider, or a model the registry does not list as free, is refused.
+   */
+  public freeOnlyRefusal(provider: ProviderId, model?: string): { code: 'NO_FREE_PROVIDER_AVAILABLE'; message: string } | null {
+    if (!config.freeOnly) return null;
+    const tier = PROVIDER_TIERS[provider];
+    if (tier.tier === 'paid') {
+      return {
+        code: 'NO_FREE_PROVIDER_AVAILABLE',
+        message: `FREE_ONLY is enabled: ${provider} is a paid provider and was not contacted. ${tier.reason}`,
+      };
+    }
+    if (model) {
+      const known = listModels({ provider }).find((m) => m.id === model);
+      if (known && !known.free) {
+        return {
+          code: 'NO_FREE_PROVIDER_AVAILABLE',
+          message: `FREE_ONLY is enabled: model ${model} is not a free model and was not contacted.`,
+        };
+      }
+    }
+    return null;
   }
 
   /**

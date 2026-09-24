@@ -232,6 +232,15 @@ router.post('/models/test', requireAuth, asyncHandler(async (req, res) => {
     return;
   }
 
+  // This endpoint calls the adapter directly, so it must apply the FREE_ONLY
+  // gate itself - the router is not in the path to do it.
+  const refusal = freeOnlyRefusal(body.provider, body.model);
+  if (refusal) {
+    logger.info('ai model test blocked by FREE_ONLY', { provider: body.provider, model: body.model });
+    res.json({ ...refusal, status: 'BLOCKED_BY_FREE_ONLY', http: null, durationMs: 0 });
+    return;
+  }
+
   const started = Date.now();
   const outcome = await adapter.chat({
     messages: [{ role: 'user', content: 'Reply with exactly: OK' }],
@@ -290,6 +299,28 @@ const testSchema = z.object({
 
 /** Model ids contain letters, digits and the punctuation providers actually use. */
 const MODEL_PATTERN = /^[A-Za-z0-9._:/-]+$/;
+
+/**
+ * FREE_ONLY gate for the diagnostics that talk to an adapter directly rather
+ * than through the router. Without this they spend real completion quota on a
+ * paid provider while the rest of the system refuses to - the audit caught
+ * `/providers/:id/test` and `/models/test` returning PASS from a paid provider
+ * under FREE_ONLY. The policy itself lives on the router; this only shapes the
+ * HTTP response body.
+ */
+function freeOnlyRefusal(provider: ProviderId, model?: string) {
+  const refusal = aiRouter.freeOnlyRefusal(provider, model);
+  if (!refusal) return null;
+  return {
+    provider,
+    ...(model ? { model } : {}),
+    result: 'BLOCKED_BY_FREE_ONLY',
+    code: refusal.code,
+    freeOnly: true,
+    quotaCost: 'none',
+    message: refusal.message,
+  };
+}
 
 /**
  * Checks a provider is reachable and its credentials are accepted without
@@ -359,6 +390,15 @@ router.post('/providers/:id/test', requireAuth, asyncHandler(async (req, res) =>
       endpoint: status.baseUrl,
       message: `${adapter.label} API key is not configured on the server.`,
     });
+    return;
+  }
+
+  // This endpoint calls the adapter directly, so it must apply the FREE_ONLY
+  // gate itself - the router is not in the path to do it.
+  const refusal = freeOnlyRefusal(id, body.model);
+  if (refusal) {
+    logger.info('ai provider test blocked by FREE_ONLY', { provider: id });
+    res.status(200).json({ ...refusal, label: adapter.label, http: null, durationMs: 0 });
     return;
   }
 

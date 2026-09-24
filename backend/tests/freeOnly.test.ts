@@ -11,7 +11,7 @@ import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { config } from '../src/config/index.ts';
 import { AiProviderRouter, makeAdapter, type ProviderAdapter, type ProviderId } from '../src/services/aiProvider.ts';
-import { observeModel, freeEligibleModels, resetRegistry } from '../src/services/modelRegistry.ts';
+import { observeModel, freeEligibleModels, listModels, resetRegistry } from '../src/services/modelRegistry.ts';
 import { MOCK_CAPABILITIES } from './mockProviders.ts';
 import type { ChatOptions, ChatOutcome } from '../src/services/providerClient.ts';
 import type { ProviderService } from '../src/services/providers.ts';
@@ -260,4 +260,46 @@ test('per-model cooldown silences a throttled model but not its siblings', async
   const second = await router.chat('auto', call);
   assert.equal(second.ok, true);
   assert.ok(!or.calls.includes(free[0]), 'the cooling model must not be retried');
+});
+
+/**
+ * The provider/model diagnostics call an adapter directly instead of routing
+ * through chat(), so they need the same FREE_ONLY decision applied explicitly.
+ * The audit found them returning PASS from a paid provider under FREE_ONLY,
+ * which spent real quota; these cases pin that shut.
+ */
+test('freeOnlyRefusal refuses a paid provider', () => {
+  const router = build({ openrouter: new ModelProvider('openrouter', {}, { status: 200 }) });
+  const refusal = router.freeOnlyRefusal('cerebras');
+  assert.ok(refusal, 'a paid provider must be refused under FREE_ONLY');
+  assert.equal(refusal.code, 'NO_FREE_PROVIDER_AVAILABLE');
+  assert.match(refusal.message, /paid provider/);
+});
+
+test('freeOnlyRefusal refuses a non-free model of a free provider', () => {
+  const router = build({ openrouter: new ModelProvider('openrouter', {}, { status: 200 }) });
+  // An unknown id that answered is registered by observeModel with free:false,
+  // which is exactly how a paid sibling model reaches the registry.
+  const paidId = 'vendor/paid-model';
+  observeModel('openrouter', paidId, 200, 'completion');
+  const known = listModels({ provider: 'openrouter' }).find((m) => m.id === paidId);
+  assert.ok(known && !known.free, 'the observed model must be registered as non-free');
+  const refusal = router.freeOnlyRefusal('openrouter', paidId);
+  assert.ok(refusal, 'a non-free model must be refused under FREE_ONLY');
+  assert.match(refusal.message, /not a free model/);
+});
+
+test('freeOnlyRefusal allows a free provider and its free model', () => {
+  const router = build({ openrouter: new ModelProvider('openrouter', {}, { status: 200 }) });
+  const free = freeEligibleModels('openrouter');
+  assert.ok(free.length > 0, 'the registry must expose a free OpenRouter model');
+  assert.equal(router.freeOnlyRefusal('openrouter'), null);
+  assert.equal(router.freeOnlyRefusal('openrouter', free[0]), null);
+});
+
+test('freeOnlyRefusal allows everything when FREE_ONLY is off', () => {
+  config.freeOnly = false;
+  const router = build({ cerebras: new ModelProvider('cerebras', {}, { status: 200 }) });
+  assert.equal(router.freeOnlyRefusal('cerebras'), null);
+  config.freeOnly = true;
 });

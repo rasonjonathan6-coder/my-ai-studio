@@ -142,6 +142,19 @@ check 'frontend' "$BASE/" 200
 check 'API health' "$BASE/api/health" 200
 check 'unauthenticated API is rejected' "$BASE/api/projects" 401
 
+# /api/health answers even when the database is unreachable, so the checks above
+# can all pass while every account operation fails. The system status probe runs
+# a real `SELECT version()`, which is what catches a stale volume password - a
+# password changed in .env after the data directory was initialised.
+step 'Verifying database connectivity'
+STATUS="$("${CURL[@]}" "$BASE/api/system/status")"
+DB="$(printf '%s' "$STATUS" | grep -o '"name":"postgres"[^}]*' | grep -o '"state":"[A-Z_]*"')"
+echo "postgres probe reports: ${DB:-<absent>}"
+case "$DB" in
+  *AVAILABLE*) echo 'PASS  database reachable' ;;
+  *) echo 'FAIL  database not reachable'; echo "      hint: if the password changed after the volume was created, run"; echo "      ALTER ROLE ... WITH PASSWORD ... inside the postgres container, or reset the volume"; FAILED=1 ;;
+esac
+
 # The execution backend must be the sandbox. If this reports "host" the server is
 # running untrusted commands in its own process; if "unavailable" commands will
 # fail at execution time.

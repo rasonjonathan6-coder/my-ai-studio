@@ -55,6 +55,48 @@ Managed PostgreSQL needs TLS. Append `sslmode=require` to `DATABASE_URL` and set
 Either the password is wrong or it contains URL-reserved characters
 (`@ : / ? #`). Percent-encode them, do not quote them.
 
+### `password authentication failed` after changing the password
+
+PostgreSQL only applies `POSTGRES_PASSWORD` when it initialises the data
+directory. Changing the value in `.env` on an existing volume updates the
+`DATABASE_URL` the backend connects with, but not the password stored in the
+database, so every connection fails while `pg_isready` still reports the
+container healthy.
+
+Symptoms: `/api/health` answers 200, `/api/projects` answers 401 as expected,
+but registration and login return 500 with `password authentication failed for
+user` in the backend log. `GET /api/system/status` reports
+`postgres: ERROR`, which is how `scripts/deploy-production.sh` catches it.
+
+Fix without losing data:
+
+```bash
+docker compose -p masprod -f docker-compose.prod.yml exec -T postgres \
+  bash -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+    -c "ALTER ROLE $POSTGRES_USER WITH PASSWORD '"'"'$POSTGRES_PASSWORD'"'"'"'
+```
+
+The single-quoted shell construction is deliberate: the new password is read
+from the container's own environment, so it is never passed on a command line
+visible in the host process list.
+
+`ALTER ROLE ... WITH PASSWORD` stores the SCRAM verifier in `pg_authid`, so a
+separate one-off `ALTER DATABASE ... WITH PASSWORD` is not needed. If
+`pg_authid.rolpassword` is already a `SCRAM-SHA-256$` verifier and TCP
+connections still fail, the stored verifier is stale.
+
+Setting `POSTGRES_HOST_AUTH_METHOD=trust` is the usual shortcut and is wrong
+here: it makes the database accept any password from any client that can reach
+it, which on a shared host is a real exposure.
+
+To start over instead (destroys all data):
+
+```bash
+docker compose -p masprod -f docker-compose.prod.yml down
+docker volume rm masprod_pgdata
+docker compose -p masprod -f docker-compose.prod.yml up -d
+```
+
 ### `prepared statement "s0" already exists`
 
 You are on a connection pooler in **transaction** mode (Supabase port 6543),

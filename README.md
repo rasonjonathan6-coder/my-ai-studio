@@ -93,6 +93,9 @@ database and a session secret; everything else degrades to a reported
 | --- | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection | startup fails loudly |
 | `JWT_SECRET` | session signing | generated per process, warned at boot |
+| `MY_AI_STUDIO_CREDENTIAL_KEY` | encrypts the stored GitHub credential | falls back to `JWT_SECRET`; if neither is set the credential cannot survive a restart |
+| `MY_AI_STUDIO_ADMIN_EMAIL` | promotes an existing account to admin at startup | needed only when the database has users but no admin |
+| `MY_AI_STUDIO_GITHUB_TOKEN` | server-side GitHub credential (write access) | GitHub publish/dispatch reports `not_configured` |
 | `OPENROUTER_API_KEY` | LLM access | agent reports `not_configured` |
 | `OPENROUTER_MODEL` | model id | defaults to `openrouter/free` |
 | `SANDBOX_ENABLED` | run commands in Docker | falls back to host backend, reported as such |

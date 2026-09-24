@@ -11,7 +11,19 @@ import { eventBus } from '../services/eventBus.ts';
 import { checkDatabase } from '../db/pool.ts';
 import { checkEmulator } from '../services/androidPreview.ts';
 import { getGithubStatus, downloadArtifact } from '../services/githubActions.ts';
-import { requireAuth } from '../middleware/auth.ts';
+import { requireAuth, requireAdmin } from '../middleware/auth.ts';
+import {
+  credentialInfo,
+  clearStoredCredential,
+  saveStoredCredential,
+  validateTokenShape,
+  matchesStored,
+  probeCredential,
+} from '../services/githubCredential.ts';
+import { z } from 'zod';
+import { validate, HttpError } from '../middleware/validate.ts';
+import { audit } from '../services/projects.ts';
+import { isDatabaseConfigured } from '../db/pool.ts';
 
 const router = Router();
 
@@ -134,6 +146,117 @@ router.get('/system/emulator', asyncHandler(async (_req, res) => {
 router.get('/system/github', requireAuth, asyncHandler(async (_req, res) => {
   const status = await getGithubStatus();
   res.json(status);
+}));
+
+/**
+ * The GitHub credential My AI Studio itself uses.
+ *
+ * Returns only non-secret facts: which source is in play, a short fingerprint
+ * that identifies a credential without revealing it, and its shape. The token
+ * is never included, in any form, on any path.
+ */
+router.get('/system/github/credential', requireAuth, requireAdmin, asyncHandler(async (_req, res) => {
+  const info = credentialInfo();
+  res.json({
+    configured: info.configured,
+    source: info.source,
+    fingerprint: info.fingerprint,
+    tokenKind: info.tokenKind,
+    repo: info.repo,
+    updatedAt: info.updatedAt,
+    // A deployment-supplied value cannot be changed here; the UI uses this to
+    // explain why the form may be overridden.
+    editable: info.source === 'database' || info.source === 'none',
+    databaseConfigured: isDatabaseConfigured(),
+    envVariable: 'MY_AI_STUDIO_GITHUB_TOKEN',
+    detail: describeCredentialSource(info.source),
+  });
+}));
+
+function describeCredentialSource(source: string): string {
+  switch (source) {
+    case 'database':
+      return 'using the credential stored in My AI Studio';
+    case 'env':
+      return 'using MY_AI_STUDIO_GITHUB_TOKEN from the deployment environment';
+    case 'app':
+      return 'using a GitHub App installation token';
+    default:
+      return 'no GitHub credential is configured; publishing and Android builds are NOT AVAILABLE until one is set';
+  }
+}
+
+const credentialSchema = z.object({
+  // Bounded so an oversized body cannot be used to exhaust memory, and trimmed
+  // so a pasted trailing newline does not become part of the secret.
+  token: z.string().min(20).max(512),
+  repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, 'repo must be owner/name').optional(),
+});
+
+/**
+ * Stores or replaces the credential. Admin only. The value is encrypted before
+ * it is written, and the response echoes a fingerprint rather than the token.
+ */
+router.put('/system/github/credential', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  if (!isDatabaseConfigured()) {
+    throw new HttpError(503, 'DATABASE_URL is not configured on the server, so a credential cannot be stored', 'database_not_configured');
+  }
+  const body = validate(credentialSchema, req.body);
+  const shapeError = validateTokenShape(body.token);
+  if (shapeError) {
+    await audit({ userId: req.user?.id, action: 'github.credential.set', outcome: 'invalid', ip: req.ip ?? null });
+    throw new HttpError(400, shapeError, 'invalid_credential');
+  }
+  const info = await saveStoredCredential(body.token, body.repo ?? null, req.user?.id ?? null);
+  await audit({
+    userId: req.user?.id,
+    action: 'github.credential.set',
+    ip: req.ip ?? null,
+    detail: { fingerprint: info.fingerprint, tokenKind: info.tokenKind, repo: info.repo },
+  });
+  // Prove the credential against the live repository so the operator learns
+  // immediately whether it can actually write, rather than on the next build.
+  const status = await getGithubStatus();
+  res.json({
+    ok: true,
+    fingerprint: info.fingerprint,
+    tokenKind: info.tokenKind,
+    source: info.source,
+    status,
+  });
+}));
+
+/** Removes the stored credential, falling back to the environment if present. */
+router.delete('/system/github/credential', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  if (!isDatabaseConfigured()) {
+    throw new HttpError(503, 'DATABASE_URL is not configured on the server', 'database_not_configured');
+  }
+  const info = await clearStoredCredential();
+  await audit({ userId: req.user?.id, action: 'github.credential.clear', ip: req.ip ?? null });
+  res.json({ ok: true, source: info.source, configured: info.configured });
+}));
+
+/**
+ * Verifies a candidate credential against GitHub without storing it. Used by
+ * the admin panel to test a token before committing it, and to confirm that a
+ * pasted value matches what is already stored without either being displayed.
+ */
+router.post('/system/github/credential/test', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  const body = validate(credentialSchema, req.body);
+  const shapeError = validateTokenShape(body.token);
+  if (shapeError) throw new HttpError(400, shapeError, 'invalid_credential');
+  const probe = await probeCredential(body.token, body.repo ?? credentialInfo().repo);
+  await audit({
+    userId: req.user?.id,
+    action: 'github.credential.test',
+    outcome: probe.ok ? 'ok' : 'failed',
+    ip: req.ip ?? null,
+    detail: { canWrite: probe.canWrite, login: probe.login ?? null },
+  });
+  res.json({
+    ...probe,
+    matchesStored: matchesStored(body.token),
+  });
 }));
 
 /**

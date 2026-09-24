@@ -86,6 +86,14 @@ Before exposing this to anyone else, all of the following must be true:
 - [ ] `JWT_SECRET` is a real 32+ character random value. The helper script now
       generates one into a gitignored `.dev-credentials`, so no placeholder is
       committed; production must supply its own via the environment.
+- [ ] `MY_AI_STUDIO_CREDENTIAL_KEY` is a separate real random value, so a
+      credential stored through the admin API survives a restart and is not
+      tied to the session signing key. Without it (or a real `JWT_SECRET`) a
+      stored credential becomes undecryptable on every restart and the app
+      logs `stored GitHub credential could not be decrypted`.
+- [ ] `MY_AI_STUDIO_ADMIN_EMAIL` names an existing account when the database
+      already has users, because the GitHub credential API is admin-only and a
+      deployment with no admin cannot configure it.
 - [ ] `DATABASE_URL` points at a real database with TLS (`sslmode=require`)
 - [ ] `CORS_ORIGINS` lists your exact frontend origin, not `*`
 - [ ] `SESSION_COOKIE_SAMESITE` matches your topology (`none` if cross-site)

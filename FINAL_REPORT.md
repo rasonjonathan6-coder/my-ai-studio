@@ -1040,3 +1040,164 @@ on the blob write.
 
 `ORACLE DEPLOYMENT`, `CLOUDFLARE PAGES` and `ANDROID EMULATOR` remain NOT TESTED
 or NOT AVAILABLE as recorded above; nothing in this addendum changes that.
+
+---
+
+## ADDENDUM — 2026-09-24 (late): the read-only credential is fixed, and a translator APK is built end to end
+
+This addendum supersedes the scope note in the previous section. That note said
+a translator APK built from a published workspace was NOT TESTED because the
+server credential was read-only. A write-capable fine-grained PAT is now stored
+in My AI Studio's own database, so the whole path was exercised for real, and a
+defect that would have silently discarded that credential across a restart was
+found and fixed.
+
+### The credential is now write-capable
+
+`GET /api/system/github` reports `canWrite: true` and `actions: true` for
+`rasonjonathan6-coder/app`, and `GET /actions/workflows` lists
+`.github/workflows/android-build.yml` as `active` on `main`.
+
+### A stored credential was lost on every restart
+
+`loadStoredCredential()` logged `stored GitHub credential could not be
+decrypted; it must be re-entered` at every boot, and the app fell back to the
+environment token. The cause was not the credential but the key:
+
+- The at-rest key was derived from `JWT_SECRET`.
+- `JWT_SECRET` was unset, and config generates a random one per process when it
+  is unset.
+- So the key changed on every boot, and the previously stored ciphertext could
+  never be decrypted again. The same random secret also invalidated every
+  session at restart — which is why an API call returned 401 mid-session.
+
+The fix is a dedicated key, `MY_AI_STUDIO_CREDENTIAL_KEY`, preferred over
+`JWT_SECRET`, with `credentialKeyIsStable` exposed and an error logged in
+production when neither is set. The failure is now reported instead of being
+silently absorbed into an env fallback.
+
+Verified: after storing the credential and restarting the process with the
+host's own `ghu_` token still injected, the log reads
+
+```
+stored GitHub credential loaded  source=database fingerprint=0d6ba110a99a3b3a tokenKind=fine-grained-pat
+github credential resolved       source=database fingerprint=0d6ba110a99a3b3a tokenKind=fine-grained-pat
+```
+
+so the durable, app-owned credential is preferred over the host token, and it
+survives the restart.
+
+### Translator APK, published and built end to end
+
+1. `POST /api/projects` created a `android-floating-translator` project
+   (`dc6cf654…`, package `com.myaistudio.floatingtranslator`).
+2. `POST /api/projects/:id/github/build` returned HTTP 202 and published the
+   workspace: branch `my-ai-studio-build`, commit `7d24cde8ca2d`, **23 files**,
+   `workflowOnDefaultBranch: main`.
+3. GitHub run `36049247179` (workflow `android-build`, `workflow_dispatch`,
+   `head_branch: my-ai-studio-build`, `head_sha: 7d24cde`) reached
+   `completed / success`. Its artifacts are real:
+   `app-debug-apk` 4 654 332 bytes and `test-reports` 23 494 bytes.
+4. My AI Studio independently fetched and inspected the APK and recorded
+   `valid: true`, `packageName: com.myaistudio.floatingtranslator`,
+   `versionName: 2.0`, `versionCode: 2`,
+   sha256 `08c5d5b1dff51de54ef5618e970b6dae95bf6e3ebf3651ad2f78e60365e5f1e5`.
+5. `GET …/github/build/:buildId/apk` returned HTTP 200,
+   `Content-Type: application/vnd.android.package-archive`, 5 639 077 bytes,
+   magic `504b0304`. The recomputed sha256 is byte-identical to the value
+   recorded in step 4, so the download is the artifact that was inspected, not
+   a lookalike.
+
+The earlier scope note — that only the `hello` sample had ever been built — no
+longer applies. The APK above is the floating translator.
+
+### Secret containment, re-verified on this build
+
+- The ZIP export (`POST /api/projects/:id/export`, 200, 23 entries, sha256
+  `0a6e8be8…`) contains **no** `.env`, `.git`, `node_modules`, secret or
+  credential entry, and no file whose text matches `github_pat_`, `sk-or-`,
+  `OPENROUTER_API_KEY`, `MY_AI_STUDIO_GITHUB_TOKEN`,
+  `MY_AI_STUDIO_CREDENTIAL_KEY`, `password=` or `private_key`.
+- The **built frontend bundle** (`frontend/dist`) was searched for the live PAT,
+  the live credential key, and any token-shaped string
+  (`github_pat_…`, `sk-or-…`, `gh[pousr]_…`): **no match**. The only
+  `import.meta.env` reference in the source is `VITE_API_URL`, so no secret is
+  reachable through a `VITE_*` variable.
+
+### Providers, probed live under FREE_ONLY
+
+```
+openrouter  FAIL  HTTP 429  rate_limited     daily free-model quota exhausted; resets 2026-09-25T00:00:00Z
+gemini      PASS  HTTP 200  gemini-3.5-flash-lite
+groq        PASS  HTTP 200  qwen/qwen3.8-27b
+nvidia      PASS  HTTP 200  nvidia/nemotron-3-super-120b-a12b
+```
+
+The 429 is reported as a failure, not smoothed into a PASS; three other free
+providers answer with real HTTP 200.
+
+### Agent loop, verified end to end
+
+`POST /api/projects/:id/agent/run` on a blank project, asked to create
+`greet.js` plus a `node:test` suite and run it:
+
+- run `7f015a88…` finished `status: succeeded`, `phase: completed`,
+  `fix_attempts: 0 / max 5`, 10 200 in / 575 out tokens.
+- Real failover is recorded: `failover_from: groq`,
+  `failover_reason: "groq unavailable; nvidia answered"`, model
+  `nvidia/nemotron-3-super-120b-a12b`. Gemini and Cloudflare were tried first
+  and rejected with `MALFORMED_FUNCTION_CALL` / empty content, which is why the
+  router moved on.
+- The files are real: `greet.js` exports `greet(name)`, and running
+  `node --test` in the workspace independently gives 1 pass / 0 fail. The
+  agent's own claim that the test passes is therefore confirmed by a separate
+  execution.
+
+### Terminal, blocked-command and security scan
+
+```
+terminal  node --version   -> exit 0, stdout "v24.21.0\n", 8ms
+terminal  rm -rf /         -> exit 126, stderr
+                              "BLOCKED BY POLICY: refusing rm on /\nCommand was not executed."
+                              (blocked, not executed)
+security scan             -> status "clean", 3 files scanned, 0 findings
+```
+
+### WebSocket authorization, probed
+
+```
+upgrade with no credentials   -> HTTP 401 (rejected at upgrade)
+upgrade with a bogus Bearer    -> HTTP 401 (rejected at upgrade)
+upgrade for another project    -> OPEN then closed 4403 forbidden
+upgrade with a valid session   -> OPEN (accepted)
+```
+
+### Checks re-run after these changes
+
+```
+backend   npm test          -> 183 pass / 0 fail   (was 174; +9 new)
+backend   npm run typecheck -> exit 0
+backend   npm run lint      -> exit 0
+frontend  npm test          -> 31 pass / 0 fail    (was 26; +5 new)
+frontend  npm run build     -> exit 0 (tsc -b && vite build, 44 modules)
+frontend  npm run lint      -> exit 0
+```
+
+Nine new tests pin the fixes: four assert that a credential-bearing log field
+is masked while a credential-*describing* field (`tokenKind`, `source`) is not,
+and five assert that the credential key is independent of `JWT_SECRET`, that an
+unconfigured key is flagged unstable, and that two processes without a
+configured key do not share one. Five frontend tests cover the admin credential
+panel, including that the credential input starts empty and that removal is
+offered only for a database-held credential. The frontend `build` also caught a
+test fixture missing `editable` and `databaseConfigured` — `tsc -b` and
+`tsc --noEmit` resolve different configs, so the production build is the
+stricter gate.
+
+### What this still does not claim
+
+`ORACLE DEPLOYMENT`, `CLOUDFLARE PAGES`, `ANDROID EMULATOR` and the GitHub API
+workflows' own CI runs remain as previously recorded: NOT TESTED or NOT
+AVAILABLE. `java`, `gradle` and the Android SDK are NOT_AVAILABLE in this
+container; the APK is built on a GitHub runner, not locally. Nothing here should
+be read as claiming a local Android build.

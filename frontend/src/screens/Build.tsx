@@ -333,20 +333,34 @@ export function BuildScreen({ projectId, events }: { projectId: string; events: 
                 <span className="hint mono">{github.repo ?? 'no repository set'}</span>
               </div>
               <div className="kv"><span>credential on server</span><span>{github.tokenConfigured || github.credential === 'app' ? github.credential : 'absent'}</span></div>
+              <div className="kv"><span>credential source</span><span>{github.credentialSource ?? 'none'}</span></div>
+              <div className="kv">
+                <span>read permission</span>
+                <span>{github.canRead === true ? 'readable' : github.canRead === false ? 'refused' : 'not determined'}</span>
+              </div>
               <div className="kv">
                 <span>publish permission</span>
                 <span>{github.canWrite === true ? 'writable' : github.canWrite === false ? 'read-only' : 'not determined'}</span>
+              </div>
+              <div className="kv">
+                <span>actions permission</span>
+                <span>{github.actions === true ? 'may dispatch' : github.actions === false ? 'refused' : 'not determined'}</span>
               </div>
               <div className="kv"><span>workflow</span><span className="mono">{github.workflow}</span></div>
               {github.detail && <p className="hint" style={{ marginTop: 6 }}>{github.detail}</p>}
               {github.canWrite === false && (
                 <p className="hint" style={{ marginTop: 8 }}>
-                  GITHUB_READ_ONLY — the credential on the server can read this repository but not write to it, so publishing the workspace and dispatching the workflow will be refused. Grant the token or App <span className="mono">contents: write</span> and <span className="mono">actions: write</span> for this repository.
+                  GITHUB_READ_ONLY — the credential on the server can read this repository but not write to it, so publishing the workspace and dispatching the workflow will be refused. Grant the credential <span className="mono">contents: write</span> and <span className="mono">actions: write</span> for this repository, or set a new one in Settings → GitHub credential.
+                </p>
+              )}
+              {github.actions === false && github.canWrite !== false && (
+                <p className="hint" style={{ marginTop: 8 }}>
+                  GITHUB_ACTIONS_DENIED — the credential can publish files but may not dispatch workflows. Grant <span className="mono">actions: write</span> to run the Android build.
                 </p>
               )}
               {github.state === 'NOT_CONFIGURED' && (
                 <p className="hint" style={{ marginTop: 8 }}>
-                  GITHUB_NOT_CONFIGURED — set GITHUB_REPO on the server (and GITHUB_TOKEN, or GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY + GITHUB_INSTALLATION_ID) to enable this.
+                  GITHUB_NOT_CONFIGURED — set MY_AI_STUDIO_GITHUB_REPO on the server, and either a credential in Settings → GitHub credential, MY_AI_STUDIO_GITHUB_TOKEN, or GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY + GITHUB_INSTALLATION_ID, to enable this.
                 </p>
               )}
 

@@ -8,6 +8,15 @@ function env(key: string, fallback = ''): string {
   return raw === undefined || raw === '' ? fallback : raw;
 }
 
+/** First non-empty value among the given keys, in order. */
+function envAny(keys: string[], fallback = ''): string {
+  for (const key of keys) {
+    const value = env(key);
+    if (value) return value;
+  }
+  return fallback;
+}
+
 function int(key: string, fallback: number): number {
   const raw = process.env[key];
   if (!raw) return fallback;
@@ -31,6 +40,14 @@ if (isProduction && configuredJwtSecret.length < 32) {
 }
 const jwtSecret = configuredJwtSecret || randomBytes(48).toString('hex');
 
+// Key material for the GitHub credential store. Kept separate from JWT_SECRET so
+// that rotating session signing keys does not make a stored credential
+// undecryptable. Falls back to JWT_SECRET for compatibility, and inherits the
+// same caveat: if JWT_SECRET is itself generated per process, the derived key
+// changes on every restart and stored credentials cannot be read back.
+const configuredCredentialKey = env('MY_AI_STUDIO_CREDENTIAL_KEY');
+const credentialKey = configuredCredentialKey || jwtSecret;
+
 const sameSiteRaw = env('SESSION_COOKIE_SAMESITE', 'lax').toLowerCase();
 if (!['lax', 'strict', 'none'].includes(sameSiteRaw)) {
   throw new Error(`SESSION_COOKIE_SAMESITE must be lax, strict or none (got "${sameSiteRaw}")`);
@@ -53,6 +70,8 @@ export const config = {
 
   jwtSecret,
   jwtSecretWasGenerated: !configuredJwtSecret,
+  credentialKey,
+  credentialKeyIsStable: Boolean(configuredCredentialKey || configuredJwtSecret),
   jwtTtlSeconds: int('JWT_TTL_SECONDS', 60 * 60 * 24 * 7),
   sessionCookieName: env('SESSION_COOKIE_NAME', 'mas_session'),
   // 'lax' is fine when the frontend shares the API's site. A cross-site
@@ -175,17 +194,29 @@ export const config = {
   // GitHub Actions integration. Optional: without a token the status endpoint
   // reports NOT_CONFIGURED and never claims a workflow ran. The token is read
   // server-side only and is never sent to the browser or written to a log.
-  githubToken: env('GITHUB_TOKEN'),
-  githubRepo: env('GITHUB_REPO'),
+  // My AI Studio's own GitHub credential. Deliberately NOT GITHUB_TOKEN: the
+  // hosting runtime injects that name into every process, and a process
+  // environment variable always wins over --env-file, so a deployment could
+  // never override it. This name belongs to the app, not to the host. A value
+  // entered through the admin API is stored in the database and takes
+  // precedence over this one; see services/githubCredential.ts.
+  githubToken: env('MY_AI_STUDIO_GITHUB_TOKEN'),
+  // The repository My AI Studio publishes to. The app-named key wins so a
+  // deployment is not at the mercy of anything the host sets globally; the
+  // generic name is still honoured for compatibility.
+  githubRepo: envAny(['MY_AI_STUDIO_GITHUB_REPO', 'GITHUB_REPO']),
+  // Promotes this account to administrator at startup. Needed because an
+  // installation that already has users cannot rely on the first-user
+  // bootstrap, and without an admin the credential API is unreachable.
+  adminEmail: env('MY_AI_STUDIO_ADMIN_EMAIL'),
   // Owner may be given separately so a deployment can accept a repository name
   // from a project without trusting the browser's idea of the namespace.
   githubOwner: env('GITHUB_OWNER'),
   githubApiBaseUrl: env('GITHUB_API_BASE_URL', 'https://api.github.com'),
   githubTimeoutMs: int('GITHUB_TIMEOUT_MS', 30000),
-  // GitHub App credentials. When all three are present they take precedence over
-  // GITHUB_TOKEN; a token remains supported so existing deployments keep
-  // working. The private key is never logged and is only used to mint a short
-  // lived installation token in memory.
+  // GitHub App credentials. When all three are present and no token is
+  // configured they are used instead of a token. The private key is never
+  // logged and is only used to mint a short lived installation token in memory.
   githubAppId: env('GITHUB_APP_ID'),
   githubAppPrivateKey: env('GITHUB_APP_PRIVATE_KEY'),
   githubAppInstallationId: env('GITHUB_INSTALLATION_ID'),

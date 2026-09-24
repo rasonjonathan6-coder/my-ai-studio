@@ -7,11 +7,35 @@ import { logger } from '../lib/logger.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
+/**
+ * Locates the migrations directory.
+ *
+ * `tsc` does not copy .sql files into dist, so a compiled build would find no
+ * migrations. Prefer the colocated copy when a build step has produced one, and
+ * otherwise fall back to src/db/migrations, which is where the files always are
+ * when running from source with --experimental-strip-types.
+ */
+async function migrationsDir(): Promise<string> {
+  const candidates = [
+    path.join(here, 'migrations'),
+    path.resolve(here, '..', '..', 'src', 'db', 'migrations'),
+  ];
+  for (const dir of candidates) {
+    try {
+      const entries = await readdir(dir);
+      if (entries.some((f) => f.endsWith('.sql'))) return dir;
+    } catch {
+      // try the next candidate
+    }
+  }
+  throw new Error(`no migrations directory found; looked in ${candidates.join(', ')}`);
+}
+
 export async function runMigrations(): Promise<{ applied: string[]; skipped: string[] }> {
   if (!isDatabaseConfigured()) {
     throw new Error('DATABASE_URL is not configured; cannot run migrations');
   }
-  const dir = path.join(here, 'migrations');
+  const dir = await migrationsDir();
   const files = (await readdir(dir)).filter((f) => f.endsWith('.sql')).sort();
 
   const pool = getPool();

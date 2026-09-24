@@ -16,6 +16,8 @@ import translateRoutes from './routes/translate.ts';
 import { attachWebSocket } from './ws/server.ts';
 import { closePool, checkDatabase } from './db/pool.ts';
 import { runMigrations } from './db/migrate.ts';
+import { loadStoredCredential } from './services/githubCredential.ts';
+import { promoteAdminByEmail, hasAdmin } from './services/auth.ts';
 import { jobQueue } from './services/jobQueue.ts';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -81,6 +83,46 @@ export async function startServer(): Promise<{ close: () => Promise<void> }> {
   } else {
     logger.warn('DATABASE_URL is not configured: database-backed endpoints will return 503');
   }
+
+  // Promote the configured operator before serving. Without an admin the
+  // credential API cannot be reached, so a deployment that cannot do this is
+  // reported rather than left silently unconfigurable.
+  if (config.adminEmail) {
+    try {
+      const promoted = await promoteAdminByEmail(config.adminEmail);
+      logger.info(promoted ? 'administrator promoted at startup' : 'configured administrator already present', {
+        email: config.adminEmail,
+      });
+    } catch (err) {
+      logger.warn('could not promote the configured administrator', {
+        email: config.adminEmail,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  } else if (config.databaseUrl) {
+    const adminExists = await hasAdmin().catch(() => false);
+    if (!adminExists) {
+      logger.warn(
+        'no administrator exists: the GitHub credential API is unreachable. Set MY_AI_STUDIO_ADMIN_EMAIL to an existing account, or register the first user.',
+      );
+    }
+  }
+
+  // Load My AI Studio's own GitHub credential before serving, so the first
+  // request after a restart already resolves it instead of racing a lazy load.
+  // This is what makes the credential durable across restarts: it is read from
+  // the app's database, not from a process environment the host controls.
+  if (config.isProduction && !config.credentialKeyIsStable) {
+    logger.error(
+      'MY_AI_STUDIO_CREDENTIAL_KEY and JWT_SECRET are both unset: a stored GitHub credential cannot be decrypted after a restart. Set one of them.',
+    );
+  }
+  const credential = await loadStoredCredential();
+  logger.info('github credential resolved', {
+    source: credential.source,
+    fingerprint: credential.fingerprint,
+    tokenKind: credential.tokenKind,
+  });
 
   const app = await createApp();
   const server = createServer(app);

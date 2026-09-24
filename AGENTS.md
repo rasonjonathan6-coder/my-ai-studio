@@ -344,3 +344,43 @@ says which step failed instead of showing the translation as if it had been
 inserted. An emulator is not available in this environment (no KVM), so on-device
 behaviour is NOT TESTED; the build path is verified by CI.
 
+
+## Operational notes that cost real debugging time
+
+**Never let a startup default generate a key that protects stored data.** The
+GitHub credential is encrypted at rest, and the key was derived from
+`JWT_SECRET`. When `JWT_SECRET` is unset, config generates a random one *per
+process*, so the key changed on every boot and the stored credential could never
+be decrypted again — the symptom looked like a broken credential, not a broken
+key. There is now a dedicated `MY_AI_STUDIO_CREDENTIAL_KEY` (preferred, with
+`JWT_SECRET` as fallback), `credentialKeyIsStable` is reported, and production
+logs an error when neither is set. Any future at-rest key must be sourced the
+same way: explicit env var, with instability reported rather than silently
+absorbed. The same random-secret behaviour invalidates sessions across restarts,
+which is why a mid-session 401 is a symptom of the same root cause.
+
+**A credential stored in the database must outrank a host-injected one.** If the
+runtime injects `GITHUB_TOKEN` (for example a `ghu_` token from the sandbox) the
+env credential is a fallback only. The admin-set, database-held credential wins,
+and the resolved `source`, `fingerprint` and `tokenKind` are logged so which one
+is in play is never a guess.
+
+**Secret-scan regexes must match values, not names.** Adding `GITHUB_TOKEN`,
+`CREDENTIAL_KEY`, `DATABASE_URL` and `JWT_SECRET` to the built-bundle scan made
+it fail on legitimate UI copy ("... independent of any GITHUB_TOKEN the host
+environment ...") and on the `github_pat_...` input placeholder. The bundle scan
+now matches value shapes (`github_pat_[A-Za-z0-9_]{20,}`, `gh[pousr]_...`,
+`sk-or-...`, a `postgres://user:pass@` URL, a private-key header). The
+working-tree scan still matches `NAME=value` pairs, where a name match is the
+point.
+
+**`tsc --noEmit` and the production build are different gates.** `npm run build`
+runs `tsc -b`, which resolves project references and was stricter than the
+typecheck used during development; it caught a test fixture missing required
+fields that `tsc --noEmit` accepted. Run the production build before believing
+the types are fine.
+
+**Export is a `POST`.** `POST /api/projects/:id/export` generates the ZIP and
+returns its path, entry count, size and sha256; `GET .../download/zip` streams a
+fresh archive. A `GET` against the export path 404s, which reads like a missing
+feature but is a wrong verb.

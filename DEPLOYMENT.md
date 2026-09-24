@@ -30,8 +30,10 @@ git clone https://github.com/<owner>/<repo>.git my-ai-studio
 cd my-ai-studio
 
 cp .env.production.example .env
-# Fill in DATABASE_URL and JWT_SECRET at minimum.
-# Generate the secret with: openssl rand -hex 32
+# Fill in DATABASE_URL, JWT_SECRET and MY_AI_STUDIO_CREDENTIAL_KEY at minimum.
+# Generate each with: openssl rand -hex 32
+# MY_AI_STUDIO_CREDENTIAL_KEY encrypts the stored GitHub credential. Keep it
+# separate from JWT_SECRET so rotating sessions does not lock the credential out.
 
 # Workspaces must be writable by the runtime user (uid 1000 in the images).
 mkdir -p /data/workspaces /data/storage
@@ -206,5 +208,6 @@ safe.
 ## Before going live
 
 See `PRODUCTION_CHECKLIST.md`. The short version: a real `JWT_SECRET`, a real
-`DATABASE_URL` with TLS, `CORS_ORIGINS` pinned to your domain, HTTPS terminated
-in front, and the API port unreachable from the internet.
+`MY_AI_STUDIO_CREDENTIAL_KEY`, a real `DATABASE_URL` with TLS, `CORS_ORIGINS`
+pinned to your domain, HTTPS terminated in front, and the API port unreachable
+from the internet.

@@ -1,7 +1,7 @@
 import type {
   AgentRun, AiAutoProbeResponse, AiModel, AiModelTestResult, AiProviderProbeResult, AiProviderTestResult, AiProvidersResponse,
   BuildResult, CommandHistoryEntry, CommandResult, Conversation,
-  ExportResult, FileEntry, FreePlanEntry, GithubBuild, GithubStatus, Message, ModelSummary, PreviewResult, Project, ProviderSelection, SecurityScan, SystemStatus, User,
+  ExportResult, FileEntry, FreePlanEntry, GithubBuild, GithubCredential, CredentialProbe, GithubStatus, Message, ModelSummary, PreviewResult, Project, ProviderSelection, SecurityScan, SystemStatus, User,
 } from './types.ts';
 
 /** Re-exported so callers have a single import site for the contract types. */
@@ -72,6 +72,26 @@ export const api = {
   systemInfo: () => request<SystemStatus & { config: Record<string, unknown> }>('/api/system/info'),
   emulator: () => request<PreviewResult & { status: string; note: string }>('/api/system/emulator'),
   github: () => request<GithubStatus>('/api/system/github'),
+  githubCredential: () => request<GithubCredential>('/api/system/github/credential'),
+  /**
+   * Stores the server-side GitHub credential. The value is write-only: it is
+   * sent once and is never returned by any endpoint.
+   */
+  setGithubCredential: (token: string, repo?: string) =>
+    request<{ ok: boolean; fingerprint: string; tokenKind: string; source: string; status: GithubStatus }>(
+      '/api/system/github/credential',
+      { ...json({ token, repo }), method: 'PUT' },
+    ),
+  clearGithubCredential: () =>
+    request<{ ok: boolean; source: string; configured: boolean }>(
+      '/api/system/github/credential',
+      { method: 'DELETE' },
+    ),
+  testGithubCredential: (token: string, repo?: string) =>
+    request<CredentialProbe>('/api/system/github/credential/test', {
+      ...json({ token, repo }),
+      method: 'POST',
+    }),
 
   // projects
   listProjects: () => request<{ projects: Project[] }>('/api/projects'),

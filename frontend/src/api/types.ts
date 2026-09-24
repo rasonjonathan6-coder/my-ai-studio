@@ -4,6 +4,7 @@ export interface User {
   id: string;
   email: string;
   displayName: string | null;
+  isAdmin: boolean;
   createdAt: string;
 }
 
@@ -409,6 +410,42 @@ export interface GithubStatus {
    * though the repository probes as reachable.
    */
   canWrite: boolean | null;
+  /** Whether the repository answered an authenticated read. */
+  canRead: boolean | null;
+  /** Whether the credential may start a workflow run. */
+  actions: boolean | null;
+  /** Repository the status was probed against. */
+  repository: string | null;
+  /** Which source supplied the credential. */
+  credentialSource: 'database' | 'env' | 'app' | 'none';
+}
+
+/** My AI Studio's own GitHub credential state. The token itself is never sent. */
+export interface GithubCredential {
+  configured: boolean;
+  source: 'database' | 'env' | 'app' | 'none';
+  /** Short digest identifying the credential without revealing it. */
+  fingerprint: string | null;
+  tokenKind: string | null;
+  repo: string | null;
+  updatedAt: string | null;
+  editable: boolean;
+  databaseConfigured: boolean;
+  envVariable: string;
+  detail: string;
+}
+
+/** Result of verifying a candidate credential against GitHub. */
+export interface CredentialProbe {
+  ok: boolean;
+  login: string | null;
+  scopes: string | null;
+  repo: string | null;
+  canRead: boolean;
+  canWrite: boolean | null;
+  actions: boolean | null;
+  error: string | null;
+  matchesStored: boolean;
 }
 
 /** Status of a build dispatched to GitHub Actions from a project. */

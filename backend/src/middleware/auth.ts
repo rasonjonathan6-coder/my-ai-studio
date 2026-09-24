@@ -43,3 +43,22 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   }
   next();
 }
+
+/**
+ * Admin auth. Guards the endpoints that manage server-wide credentials, which
+ * are not project-scoped and therefore must not be reachable by an ordinary
+ * account. Must be mounted after requireAuth.
+ */
+export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
+  if (!req.user) {
+    res.status(401).json({ error: 'authentication required' });
+    return;
+  }
+  if (!req.user.isAdmin) {
+    // Deliberately the same shape as an auth failure: an ordinary user should
+    // not learn that an admin-only surface exists.
+    res.status(403).json({ error: 'administrator privileges required', code: 'admin_required' });
+    return;
+  }
+  next();
+}

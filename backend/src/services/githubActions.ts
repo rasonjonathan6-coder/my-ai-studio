@@ -7,14 +7,15 @@
  * configured token whose call fails is reported as ERROR with the real HTTP
  * status, not as PASS.
  *
- * Credentials are read from the server environment only and are never placed in
- * a response body, a log line or an artifact listing. A GitHub App installation
- * token is preferred when the App variables are present; GITHUB_TOKEN remains
- * supported so an existing deployment keeps working.
+ * Credentials are read from My AI Studio's own credential store, falling back
+ * to the deployment-provided MY_AI_STUDIO_GITHUB_TOKEN. They are never placed in
+ * a response body, a log line or an artifact listing. The host-injected
+ * GITHUB_TOKEN is deliberately ignored; see services/githubCredential.ts.
  */
 import crypto from 'node:crypto';
 import { config } from '../config/index.ts';
 import { logger, redact } from '../lib/logger.ts';
+import { credentialInfo, resolvedToken, type CredentialSource } from './githubCredential.ts';
 import { readZipEntries, readZipEntry } from '../lib/apkZip.ts';
 
 /** What a probe of the GitHub integration concluded. */
@@ -71,6 +72,18 @@ export interface GithubStatus {
    * refused publish instead of showing a healthy integration.
    */
   canWrite: boolean | null;
+  /** Whether the repository answered an authenticated read. */
+  canRead: boolean | null;
+  /**
+   * Whether the credential may start a workflow run. Probed by dispatching with
+   * a ref that cannot exist: GitHub answers 422 when the credential is allowed
+   * and 403/404 when it is not, so no run is ever created by the probe.
+   */
+  actions: boolean | null;
+  /** Repository the status was probed against, echoed for the UI. */
+  repository: string | null;
+  /** Which source supplied the credential: database, env, app or none. */
+  credentialSource: CredentialSource;
 }
 
 let lastStatus: GithubStatus = {
@@ -84,6 +97,10 @@ let lastStatus: GithubStatus = {
   latestRun: null,
   latestArtifacts: [],
   canWrite: null,
+  canRead: null,
+  actions: null,
+  repository: config.githubRepo || null,
+  credentialSource: credentialInfo().source,
 };
 
 /** Endpoint needing no token, so the integration can be probed cheaply. */
@@ -94,8 +111,20 @@ function apiBase(): string {
 /** Which credential shape the server holds. Never the credential itself. */
 export type CredentialKind = 'app' | 'token' | 'none';
 
+/** True when all three GitHub App variables are present. */
+function appConfigured(): boolean {
+  return Boolean(config.githubAppId && config.githubAppPrivateKey && config.githubAppInstallationId);
+}
+
+/**
+ * The credential shape, resolved in the same precedence order as the token:
+ * an admin-stored credential first, then a fully configured GitHub App, then the
+ * deployment variable. credentialInfo() is a cached read, so this stays
+ * synchronous for callers that only branch on readiness.
+ */
 export function credentialKind(): CredentialKind {
-  if (config.githubAppId && config.githubAppPrivateKey && config.githubAppInstallationId) return 'app';
+  if (credentialInfo().source === 'database') return 'token';
+  if (appConfigured()) return 'app';
   if (config.githubToken) return 'token';
   return 'none';
 }
@@ -146,7 +175,11 @@ function base64url(input: string): string {
 async function resolveCredential(): Promise<{ ok: boolean; token: string | null; kind: CredentialKind; error?: string }> {
   const kind = credentialKind();
   if (kind === 'none') return { ok: false, token: null, kind, error: 'no GitHub credential is configured' };
-  if (kind === 'token') return { ok: true, token: config.githubToken, kind };
+  if (kind === 'token') {
+    const { token } = resolvedToken();
+    if (!token) return { ok: false, token: null, kind, error: 'no GitHub credential is configured' };
+    return { ok: true, token, kind };
+  }
   const minted = await appInstallationToken();
   if (!minted.ok) return { ok: false, token: null, kind, error: `GitHub App token request failed: ${minted.error}` };
   return { ok: true, token: minted.token, kind };
@@ -158,7 +191,7 @@ function headers(token?: string | null): Record<string, string> {
     'user-agent': 'my-ai-studio',
     'x-github-api-version': '2022-11-28',
   };
-  const bearer = token ?? config.githubToken;
+  const bearer = token ?? resolvedToken().token;
   if (bearer) h.authorization = `Bearer ${bearer}`;
   return h;
 }
@@ -262,8 +295,12 @@ function mapArtifact(raw: Record<string, unknown>): ArtifactSummary {
  * makes AVAILABLE a real observation rather than a claim about configuration.
  */
 export async function getGithubStatus(): Promise<GithubStatus> {
-  const tokenConfigured = config.githubToken.length > 0;
+  const info = credentialInfo();
+  // tokenConfigured now reflects the whole resolution chain, not just the env
+  // variable, so a credential stored by an admin is reported as present.
+  const tokenConfigured = info.configured && info.source !== 'app';
   const credential = credentialKind();
+  const credentialSource = info.source;
   const repo = config.githubRepo;
 
   // A repository is the one hard requirement. Without a token the public
@@ -278,10 +315,14 @@ export async function getGithubStatus(): Promise<GithubStatus> {
       tokenConfigured,
       credential,
       workflow: config.githubWorkflow,
-      detail: 'GITHUB_REPO is unset on the server',
+      detail: 'MY_AI_STUDIO_GITHUB_REPO (or GITHUB_REPO) is unset on the server',
       latestRun: null,
       latestArtifacts: [],
       canWrite: null,
+      canRead: null,
+      actions: null,
+      repository: null,
+      credentialSource,
     };
     return lastStatus;
   }
@@ -299,6 +340,10 @@ export async function getGithubStatus(): Promise<GithubStatus> {
       latestRun: null,
       latestArtifacts: [],
       canWrite: null,
+      canRead: false,
+      actions: null,
+      repository: repo,
+      credentialSource,
     };
     logger.warn('github repository probe failed', { repo, error: probe.error ?? null });
     return lastStatus;
@@ -324,6 +369,9 @@ export async function getGithubStatus(): Promise<GithubStatus> {
   }
 
   const canWrite = await probeWriteCapability(repo);
+  // Only probe Actions when the repository was readable, so a credential that
+  // cannot even read is not asked to dispatch.
+  const actions = canWrite === null ? null : await probeActionsCapability(repo);
   lastStatus = {
     state: 'AVAILABLE',
     connected: true,
@@ -337,9 +385,15 @@ export async function getGithubStatus(): Promise<GithubStatus> {
     latestRun,
     latestArtifacts,
     canWrite,
+    canRead: true,
+    actions,
+    repository: repo,
+    credentialSource,
   };
   if (canWrite === false) {
     lastStatus.detail = `${lastStatus.detail} - the credential cannot write to this repository, so publishing and dispatching will fail`;
+  } else if (actions === false) {
+    lastStatus.detail = `${lastStatus.detail} - the credential can write files but may not dispatch workflows; grant Actions: write to run the Android build`;
   }
   return lastStatus;
 }
@@ -363,6 +417,28 @@ async function probeWriteCapability(repo: string): Promise<boolean | null> {
   if (res.ok) return true;
   // 403/404 mean the credential is authenticated but unauthorized to write;
   // anything else (network, 5xx) is inconclusive rather than a denial.
+  if (res.status === 403 || res.status === 404) return false;
+  return null;
+}
+
+/**
+ * Probes whether the credential may start a workflow run.
+ *
+ * A dispatch to a ref that cannot exist is rejected by GitHub before any run is
+ * created: the response distinguishes an authorized credential (422, the ref is
+ * the problem) from an unauthorized one (403/404, the credential is the
+ * problem). This keeps the probe side-effect free — it never starts a build —
+ * while still being a real observation rather than a guess from token scopes.
+ */
+async function probeActionsCapability(repo: string): Promise<boolean | null> {
+  const cred = await resolveCredential();
+  if (!cred.ok) return null;
+  const res = await ghFetch(
+    `/repos/${repo}/actions/workflows/${encodeURIComponent(config.githubWorkflow)}/dispatches`,
+    config.githubTimeoutMs,
+    { method: 'POST', token: cred.token, body: { ref: '__my_ai_studio_capability_probe__' } },
+  );
+  if (res.status === 422 || res.status === 200 || res.status === 201 || res.status === 204) return true;
   if (res.status === 403 || res.status === 404) return false;
   return null;
 }

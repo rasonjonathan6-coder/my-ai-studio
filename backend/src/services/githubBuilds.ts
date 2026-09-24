@@ -206,7 +206,7 @@ export async function startGithubBuild(input: {
 
   if (credentialKind() === 'none') {
     return persistBlocked({ ...input, repo, workflow, ref }, 'not_configured',
-      'no GitHub credential is configured on the server (set GITHUB_TOKEN, or GITHUB_APP_ID plus GITHUB_APP_PRIVATE_KEY and GITHUB_INSTALLATION_ID)');
+      'no GitHub credential is configured on the server (store one in Settings, or set MY_AI_STUDIO_GITHUB_TOKEN, or GITHUB_APP_ID plus GITHUB_APP_PRIVATE_KEY and GITHUB_INSTALLATION_ID)');
   }
   if (!repo) {
     return persistBlocked({ ...input, repo, workflow, ref }, 'not_configured',

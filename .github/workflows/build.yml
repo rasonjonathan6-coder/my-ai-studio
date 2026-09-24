@@ -43,7 +43,11 @@ jobs:
         working-directory: frontend
         run: |
           set -e
-          if grep -rIlE 'sk-or-[A-Za-z0-9]|OPENROUTER_API_KEY|DATABASE_URL|JWT_SECRET' dist/ ; then
+          # Value-shaped patterns only. A bare name such as GITHUB_TOKEN or
+          # CREDENTIAL_KEY appears in legitimate UI copy and in the
+          # "github_pat_..." input placeholder, so matching on the name alone
+          # would fail this scan for text that leaks nothing.
+          if grep -rIlE 'sk-or-[A-Za-z0-9_-]{10,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|postgres://[^"[:space:]]+:[^"[:space:]]+@|BEGIN (RSA|OPENSSH|PRIVATE) KEY' dist/ ; then
             echo "FAILED: possible secret material found in the built bundle"
             exit 1
           fi

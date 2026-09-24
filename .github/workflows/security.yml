@@ -24,7 +24,7 @@ jobs:
       - name: Fail on secret-looking values in the working tree
         run: |
           set -e
-          patterns='sk-or-[A-Za-z0-9_-]{10,}|OPENROUTER_API_KEY[[:space:]]*=[[:space:]]*[^"$[:space:]]{8,}|DATABASE_URL[[:space:]]*=[[:space:]]*postgres://[^"$[:space:]]+:[^"$[:space:]]+@|JWT_SECRET[[:space:]]*=[[:space:]]*[^"$[:space:]]{8,}|BEGIN (RSA|OPENSSH|PRIVATE) KEY|private_key[[:space:]]*=[[:space:]]*[^"[:space:]]{8,}'
+          patterns='sk-or-[A-Za-z0-9_-]{10,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|OPENROUTER_API_KEY[[:space:]]*=[[:space:]]*[^"$[:space:]]{8,}|(MY_AI_STUDIO_)?GITHUB_TOKEN[[:space:]]*=[[:space:]]*[^"$[:space:]]{8,}|MY_AI_STUDIO_CREDENTIAL_KEY[[:space:]]*=[[:space:]]*[^"$[:space:]]{8,}|DATABASE_URL[[:space:]]*=[[:space:]]*postgres://[^"$[:space:]]+:[^"$[:space:]]+@|JWT_SECRET[[:space:]]*=[[:space:]]*[^"$[:space:]]{8,}|BEGIN (RSA|OPENSSH|PRIVATE) KEY|private_key[[:space:]]*=[[:space:]]*[^"[:space:]]{8,}'
           if git grep -InE "$patterns" -- . ':!*.example' ':!*.md' ':!.github/workflows/*' ':!backend/test/**' ':!backend/tests/**' ':!frontend/src/**/*.test.ts' ; then
             echo "SECURITY FAILED: secret-like value present in tracked files"
             exit 1

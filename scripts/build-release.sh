@@ -43,10 +43,14 @@ fi
 
 # --- apk: only if a real APK was supplied ----------------------------------
 APK_SRC="${1:-}"
+APK_SHA=""
+APK_SIZE=""
 if [ -n "$APK_SRC" ] && [ -f "$APK_SRC" ]; then
   mkdir -p "$OUT/apk"
   cp "$APK_SRC" "$OUT/apk/app-debug.apk"
-  echo "apk: copied $(stat -c%s "$OUT/apk/app-debug.apk") bytes"
+  APK_SHA="$(sha256sum "$OUT/apk/app-debug.apk" | cut -d' ' -f1)"
+  APK_SIZE="$(stat -c%s "$OUT/apk/app-debug.apk")"
+  echo "apk: copied $APK_SIZE bytes, sha256 $APK_SHA"
 else
   echo "apk: NOT AVAILABLE (no APK path supplied; run with ./scripts/build-release.sh /path/to/app-debug.apk)"
 fi
@@ -69,6 +73,31 @@ Assembled from commit \`$GIT_REV\`.
 | \`checksums/\` | \`SHA256SUMS.txt\` for every file above. |
 
 Verify with \`cd release && sha256sum -c checksums/SHA256SUMS.txt\`.
+
+## APK provenance
+
+The APK in \`apk/\` was produced by a GitHub Actions run, not on the machine
+that assembled this release. The bytes here are the bytes that run published.
+
+| Field | Value |
+| --- | --- |
+EOF
+
+if [ -n "$APK_SHA" ]; then
+  cat >> "$OUT/README.md" <<EOF
+| sha256 | \`$APK_SHA\` |
+| size | $APK_SIZE bytes |
+EOF
+else
+  cat >> "$OUT/README.md" <<EOF
+| APK | not included in this release |
+EOF
+fi
+
+cat >> "$OUT/README.md" <<EOF
+
+Reproducing the build requires a published workspace and a
+\`workflow_dispatch\` against it; see \`docs/GITHUB_ACTIONS.md\`.
 EOF
 
 echo "release written to $OUT"

@@ -8,7 +8,8 @@ const SECRET_PATTERNS: RegExp[] = [
   // GitHub tokens: classic (ghp_/gho_/ghs_/ghu_/ghr_) and fine-grained (github_pat_).
   /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g,
   /(OPENROUTER_API_KEY\s*[=:]\s*)\S+/gi,
-  /(GITHUB_TOKEN\s*[=:]\s*)\S+/gi,
+  /((?:MY_AI_STUDIO_)?GITHUB_TOKEN\s*[=:]\s*)\S+/gi,
+  /(MY_AI_STUDIO_CREDENTIAL_KEY\s*[=:]\s*)\S+/gi,
   /(DATABASE_URL\s*[=:]\s*)\S+/gi,
   /(JWT_SECRET\s*[=:]\s*)\S+/gi,
   /(password\s*[=:]\s*)\S+/gi,
@@ -16,6 +17,22 @@ const SECRET_PATTERNS: RegExp[] = [
   /(authorization:\s*bearer\s+)\S+/gi,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
 ];
+
+/**
+ * Extra literal secrets registered at runtime. The stored GitHub credential is
+ * read from the database rather than from config, so it cannot be discovered by
+ * this module directly; the credential service registers it here so it is
+ * masked in every log line like any other secret.
+ */
+const extraSecrets = new Set<string>();
+
+export function registerSecret(value: string | null): void {
+  if (value && value.length >= 8) extraSecrets.add(value);
+}
+
+export function forgetSecret(value: string | null): void {
+  if (value) extraSecrets.delete(value);
+}
 
 /** Replace known secret shapes with a mask. Never log raw credentials. */
 export function redact(input: string): string {
@@ -30,6 +47,9 @@ export function redact(input: string): string {
   }
   if (config.githubToken) {
     out = out.split(config.githubToken).join('[REDACTED]');
+  }
+  for (const secret of extraSecrets) {
+    out = out.split(secret).join('[REDACTED]');
   }
   const dbPassword = extractDbPassword(config.databaseUrl);
   if (dbPassword) out = out.split(dbPassword).join('[REDACTED]');
@@ -65,10 +85,23 @@ function emit(level: Level, msg: string, fields: Record<string, unknown> = {}): 
   else process.stdout.write(line + '\n');
 }
 
+/**
+ * Field keys whose name describes a credential rather than carrying one. These
+ * stay readable: `tokenKind: 'fine-grained-pat'` is a diagnostic, and masking it
+ * to `[REDACTED]` would make the credential state impossible to debug.
+ */
+const DESCRIPTIVE_KEY = /^(?:token_?kind|token_?configured|token_?type|credential_?source|credential_?kind|has_?token)$/i;
+
+/** Does this field name hold a secret value rather than describe one? */
+function isSecretKey(key: string): boolean {
+  if (DESCRIPTIVE_KEY.test(key)) return false;
+  return /password|secret|token|api_?key|authorization/i.test(key);
+}
+
 function redactFields(fields: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(fields)) {
-    if (/password|secret|token|api_?key|authorization/i.test(key)) {
+    if (isSecretKey(key) && value !== null && value !== undefined) {
       out[key] = '[REDACTED]';
     } else if (typeof value === 'string') {
       out[key] = redact(value);

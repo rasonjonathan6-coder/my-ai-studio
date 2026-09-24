@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client.ts';
 import { Card, Empty, StatePill, bytes, when } from '../components/ui.tsx';
+import { GithubCredentialCard } from '../components/GithubCredential.tsx';
 import type { SystemStatus, User } from '../api/types.ts';
 
 interface SystemInfo extends SystemStatus {
@@ -91,11 +92,14 @@ export function SettingsScreen({ user, onLogout }: { user: User; onLogout: () =>
         </div>
       )}
 
+      <GithubCredentialCard isAdmin={user.isAdmin === true} />
+
       <div style={{ marginTop: 12 }}>
         <Card title="Safety notes">
           <ul className="hint" style={{ paddingLeft: 18, lineHeight: 1.7 }}>
             <li>Every command runs inside the project workspace; paths escaping it are rejected.</li>
-            <li>Secrets live only in server environment variables and are redacted from logs.</li>
+            <li>Server secrets are held in the database or the server environment, never in the browser bundle.</li>
+            <li>The GitHub credential is write-only from the UI: it is never returned, not even to an admin.</li>
             <li>Project access is authorised per user on every route and WebSocket subscribe.</li>
           </ul>
         </Card>

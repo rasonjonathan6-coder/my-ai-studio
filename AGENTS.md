@@ -212,13 +212,23 @@ account entitlement are wrong - the failure code tells them apart:
 | 404 `not available on X` | model id wrong, or not entitled on this account |
 | 410 | model listed but retired |
 
-Observed on this workspace: Cerebras listed only `gpt-oss-120b` (the old default
-was retired); Mistral answered 429 quota exhausted; Cloudflare's token
-authenticated for `/accounts` but Workers AI refused it (needs the Workers AI
-permission) and no account id was set; NVIDIA's key worked but the account had no
-entitlement to any chat model tried - every id either 404'd or had reached end of
-life. Only the operator can fix entitlement and billing; the code reports the
-classification honestly rather than retrying forever.
+Observed on this workspace: Cerebras and Mistral are billing/quota failures only
+(402 and 429) - the keys are valid, so there is nothing to fix in code. Gemini's
+quota is per-model, so a 429 on one model does not mean the key is unusable:
+probe siblings before declaring the provider dead (`gemini-3.6-flash` was
+exhausted while `gemini-3.5-flash-lite` answered 200). Cloudflare's token needed
+the Workers AI permission, and the model list is the authority for model ids
+(65 models here); the previously configured `@cf/meta/llama-3.1-8b-instruct` is
+deprecated and now answers 410. NVIDIA's key was valid but the account is only
+entitled to current models: `nvidia/nemotron-3-super-120b-a12b` answers 200 while
+older llama ids 404. Note the 404-vs-410 split - 410 means the model exists but
+is retired, 404 means it is not available to this account.
+
+Cross-checking the router against a direct provider call still matters: a 429
+from the router on OpenRouter's free tier can be transient, and a retry a few
+seconds later returns 200. The AUTO failover path is exercised with
+`POST /api/ai/providers/auto/auto-probe`, which reports which provider actually
+answered and the full attempt trail.
 
 Tests must not depend on the machine's `.env`. `aiProvider.test.ts` blanks every
 provider credential before asserting `not_configured`, otherwise a developer with

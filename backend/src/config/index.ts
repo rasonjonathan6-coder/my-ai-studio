@@ -104,11 +104,11 @@ export const config = {
   // path, so the adapter builds the URL rather than reading a fixed base.
   cloudflareApiToken: env('CLOUDFLARE_API_TOKEN'),
   cloudflareAccountId: env('CLOUDFLARE_ACCOUNT_ID'),
-  cloudflareModel: env('CLOUDFLARE_MODEL', '@cf/meta/llama-3.1-8b-instruct'),
+  cloudflareModel: env('CLOUDFLARE_MODEL', '@cf/qwen/qwen2.5-coder-32b-instruct'),
   cloudflareTimeoutMs: int('CLOUDFLARE_TIMEOUT_MS', 120000),
 
   nvidiaApiKey: env('NVIDIA_API_KEY'),
-  nvidiaModel: env('NVIDIA_MODEL', 'nvidia/llama-3.3-nemotron-super-49b-v1'),
+  nvidiaModel: env('NVIDIA_MODEL', 'nvidia/nemotron-3-super-120b-a12b'),
   nvidiaBaseUrl: env('NVIDIA_BASE_URL', 'https://integrate.api.nvidia.com/v1'),
   nvidiaTimeoutMs: int('NVIDIA_TIMEOUT_MS', 120000),
 

@@ -8,7 +8,7 @@
     "build": "tsc -p tsconfig.json && node scripts/copy-migrations.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint \"src/**/*.ts\"",
-    "dev": "node --watch --env-file-if-exists=../.env --experimental-strip-types src/server.ts",
+    "dev": "node --watch --import ./scripts/load-env.mjs --experimental-strip-types src/server.ts",
     "start": "node --env-file-if-exists=../.env dist/server.js",
     "migrate": "node --env-file-if-exists=../.env --experimental-strip-types src/db/migrate.ts",
     "test": "node --env-file-if-exists=../.env --experimental-strip-types --test \"tests/**/*.test.ts\"",

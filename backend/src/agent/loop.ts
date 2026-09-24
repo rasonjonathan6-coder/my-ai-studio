@@ -13,6 +13,7 @@ import { config } from '../config/index.ts';
 import { logger, redact } from '../lib/logger.ts';
 import { type ChatMessage } from '../services/providerClient.ts';
 import { aiRouter, isProviderSelection, type ProviderId, type ProviderSelection } from '../services/aiProvider.ts';
+import { PROVIDER_TIERS } from '../services/modelRegistry.ts';
 import { WorkspaceService } from '../services/workspace.ts';
 import { agentEvent, logEvent, type AgentPhase } from '../services/eventBus.ts';
 import { runTests } from '../services/tests.ts';
@@ -180,6 +181,18 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunOutcom
     logEvent(projectId, 'build_log', 'error', message);
     return { status: 'failed', summary: message, fixAttempts: 0, finalPhase: 'failed' };
   }
+  // FREE_ONLY must fail before any file is touched when the free pool is empty,
+  // rather than reporting a failure that looks like an ordinary provider error.
+  if (config.freeOnly && aiRouter.freeModelPlan().every((p) => p.candidates.length === 0)) {
+    const paid = aiRouter.freeModelPlan().filter((p) => p.tier === 'paid').length;
+    const message = `NO_FREE_PROVIDER_AVAILABLE: FREE_ONLY is enabled and no free model is currently eligible${paid > 0 ? `; ${paid} configured provider(s) are paid-only and were not contacted` : ''}. No agent actions were performed.`;
+    await finishRun(agentRunId, {
+      status: 'failed', phase: 'failed', error: message, finished_at: new Date().toISOString(),
+    });
+    agentEvent(projectId, 'failed', message, { agentRunId });
+    logEvent(projectId, 'build_log', 'error', message);
+    return { status: 'failed', summary: message, fixAttempts: 0, finalPhase: 'failed' };
+  }
   if (selection !== 'auto' && !aiRouter.adapter(selection).isConfigured()) {
     const message = `PROVIDER_NOT_CONFIGURED: ${aiRouter.adapter(selection).label} was selected but its API key is not set on the server. No agent actions were performed.`;
     await finishRun(agentRunId, {
@@ -193,6 +206,20 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunOutcom
 
   const run = await readRun(agentRunId);
   const maxFixAttempts = run?.max_fix_attempts ?? config.maxFixAttempts;
+
+  // FREE_ONLY refuses a paid pin before the run does any work. The router would
+  // also catch it, but failing here names the policy in the run row instead of
+  // leaving a started-then-failed run for the operator to interpret.
+  if (config.freeOnly && selection !== 'auto' && PROVIDER_TIERS[selection].tier !== 'free') {
+    const message = `PROVIDER_NOT_FREE: ${aiRouter.adapter(selection).label} is a paid provider and FREE_ONLY is enabled. No agent actions were performed.`;
+    await finishRun(agentRunId, {
+      status: 'failed', phase: 'failed', error: message, provider: selection,
+      finished_at: new Date().toISOString(),
+    });
+    agentEvent(projectId, 'failed', message, { agentRunId });
+    logEvent(projectId, 'build_log', 'error', message);
+    return { status: 'failed', summary: message, fixAttempts: 0, finalPhase: 'failed' };
+  }
 
   const ws = new WorkspaceService(projectId);
   await ws.ensure();
@@ -258,6 +285,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunOutcom
     for (let waitRound = 0; waitRound < 4; waitRound += 1) {
       const routed = await aiRouter.chat(selection, {
         messages: messages.slice(-MAX_HISTORY_MESSAGES),
+        maxTokens: config.aiMaxOutputTokens,
         signal,
       }, (record) => {
         if (record.outcome === 'ok') return;

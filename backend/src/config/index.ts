@@ -141,6 +141,25 @@ export const config = {
   // Which provider the agent uses by default. 'auto' walks providerOrder and
   // fails over on temporary limits only; a named provider pins the run to it.
   aiDefaultProvider: env('AI_DEFAULT_PROVIDER', 'auto'),
+  // FREE_ONLY: the agent may only use providers and models that are free, and
+  // never falls back to a paid one. A provider whose tier is 'paid' is skipped
+  // entirely, and a paid model on a free provider is never selected. When no
+  // free model can serve the request the run reports NO_FREE_PROVIDER_AVAILABLE
+  // instead of quietly spending money.
+  freeOnly: bool('FREE_ONLY', false),
+  // How many free models of a single provider FREE_ONLY will try before moving
+  // on. Free variants are rate-limited independently, so trying a second one is
+  // worthwhile, but the chain must stay bounded.
+  aiMaxFreeModelAttempts: int('AI_MAX_FREE_MODEL_ATTEMPTS', 3),
+  // Per-attempt ceiling for one free model under FREE_ONLY. Reasoning models on
+  // the free pool can sit far longer than a hosted paid model before emitting a
+  // token; without this bound a single stalled model would consume the whole
+  // agent budget, since the router tries several models per provider.
+  aiFreeModelTimeoutMs: int('AI_FREE_MODEL_TIMEOUT_MS', 45000),
+  // Output budget the agent requests per turn. Some free models are reasoning
+  // models: the reasoning trace is billed against the same output budget, so a
+  // small default leaves no room for the answer and the reply comes back empty.
+  aiMaxOutputTokens: int('AI_MAX_OUTPUT_TOKENS', 2048),
   // AI_PROVIDER_PRIORITY is the documented forward-looking name; the older
   // AI_PROVIDER_ORDER is still honoured so existing deployments keep working.
   aiProviderPriority: env('AI_PROVIDER_PRIORITY', env('AI_PROVIDER_ORDER', 'openrouter,gemini,groq'))

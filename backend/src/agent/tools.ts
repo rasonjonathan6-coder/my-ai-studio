@@ -5,6 +5,7 @@
  */
 import { z } from 'zod';
 import { WorkspaceService } from '../services/workspace.ts';
+import { runTerminalCommand } from '../services/terminal.ts';
 import { runCommand } from '../services/commandRunner.ts';
 import { runTests } from '../services/tests.ts';
 import { runBuild } from '../services/build.ts';
@@ -139,8 +140,14 @@ export async function executeTool(name: ToolName, args: unknown, ctx: ToolContex
       case 'run_command': {
         ctx.onPhase('running', 'running command');
         const { command, timeoutMs } = input as z.infer<typeof Schemas.run_command>;
-        const result = await runCommand({
-          cwd: ws.root,
+        // Through runTerminalCommand, not runCommand directly: agent commands
+        // must land in the audit trail and stream to the terminal view exactly
+        // like a command the user typed.
+        const result = await runTerminalCommand({
+          projectId: ctx.projectId,
+          ownerId: ctx.ownerId,
+          agentRunId: ctx.agentRunId,
+          source: 'agent',
           command,
           timeoutMs: timeoutMs ?? config.commandTimeoutMs,
         });

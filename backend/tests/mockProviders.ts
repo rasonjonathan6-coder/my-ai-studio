@@ -22,7 +22,7 @@ export interface MockScript {
   throws?: boolean;
 }
 
-const MOCK_CAPABILITIES: ProviderCapabilities = { agent: true, chat: true, streaming: false, jsonMode: true };
+export const MOCK_CAPABILITIES: ProviderCapabilities = { agent: true, chat: true, streaming: false, jsonMode: true };
 
 /**
  * A provider that answers with a fixed script every time. Each call is counted,

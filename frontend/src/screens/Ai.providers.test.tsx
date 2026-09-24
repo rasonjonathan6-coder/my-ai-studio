@@ -29,25 +29,29 @@ const response: AiProvidersResponse = {
       status: 'CONFIGURED', connection: 'NOT_TESTED', model: 'qwen/qwen3.8-27b:free',
       endpoint: 'https://openrouter.ai/api/v1', cooling: false, cooldownUntil: null, cooldownReason: null,
       capabilities: { agent: true, chat: true, streaming: true, jsonMode: true },
+      tier: 'free', tierReason: 'the :free variants are priced $0', freeModels: ['nvidia/nemotron-3-ultra-550b-a55b:free'],
     },
     {
       id: 'gemini', label: 'Gemini', local: false, configured: true,
-      status: 'CONFIGURED', connection: 'NOT_TESTED', model: 'gemini-3.6-flash',
+      status: 'CONFIGURED', connection: 'NOT_TESTED', model: 'gemini-3.5-flash-lite',
       endpoint: 'https://generativelanguage.googleapis.com', cooling: true,
       cooldownUntil: new Date(Date.now() + 60000).toISOString(), cooldownReason: 'QUOTA_RATE_LIMIT',
       capabilities: { agent: true, chat: true, streaming: true, jsonMode: true },
+      tier: 'free', tierReason: 'AI Studio free tier', freeModels: ['gemini-3.5-flash-lite'],
     },
     {
       id: 'groq', label: 'Groq', local: false, configured: false,
       status: 'NOT_CONFIGURED', connection: 'NOT_TESTED', model: 'qwen/qwen3.8-27b',
       endpoint: 'https://api.groq.com/openai/v1', cooling: false, cooldownUntil: null, cooldownReason: null,
       capabilities: { agent: true, chat: true, streaming: true, jsonMode: true },
+      tier: 'free', tierReason: 'Groq free tier', freeModels: ['qwen/qwen3.8-27b'],
     },
     {
       id: 'cerebras', label: 'Cerebras', local: false, configured: false,
-      status: 'NOT_CONFIGURED', connection: 'NOT_TESTED', model: 'qwen-3-235b',
+      status: 'NOT_CONFIGURED', connection: 'NOT_TESTED', model: 'gpt-oss-120b',
       endpoint: 'https://api.cerebras.ai/v1', cooling: false, cooldownUntil: null, cooldownReason: null,
       capabilities: { agent: false, chat: true, streaming: true, jsonMode: true, agentNote: 'CHAT ONLY: no agent tool protocol observed.' },
+      tier: 'paid', tierReason: 'observed HTTP 402 insufficient credits', freeModels: [],
     },
   ],
   providerStates: [
@@ -85,6 +89,27 @@ const response: AiProvidersResponse = {
     openrouter: { date: '2026-01-01', attempts: 3, ok: 3, failed: 0 },
   },
   quotaRemaining: 'unknown',
+  freeOnly: true,
+  models: [
+    {
+      id: 'nvidia/nemotron-3-ultra-550b-a55b:free', provider: 'openrouter', free: true, coding: true,
+      tools: true, context: 1000000, evidence: 'OR /models price $0; 200 + tool_calls observed',
+      status: 'AVAILABLE', lastHttpStatus: 200, lastTested: new Date().toISOString(), lastMessage: null, observedVia: 'completion',
+    },
+    {
+      id: 'poolside/laguna-s-2.1:free', provider: 'openrouter', free: true, coding: true,
+      tools: true, context: 262144, evidence: 'OR /models price $0; tools listed',
+      status: 'RATE_LIMITED', lastHttpStatus: 429, lastTested: new Date().toISOString(), lastMessage: 'upstream 429', observedVia: 'completion',
+    },
+  ],
+  modelSummary: {
+    freeProviders: 5, freeModels: 2, available: 1, rateLimited: 1,
+    paymentRequired: 0, notAvailable: 0, notTested: 0, lastSync: null,
+  },
+  freePlan: [
+    { provider: 'openrouter', label: 'OpenRouter', tier: 'free', candidates: ['nvidia/nemotron-3-ultra-550b-a55b:free'], skippedReason: null },
+    { provider: 'cerebras', label: 'Cerebras', tier: 'paid', candidates: [], skippedReason: 'PAID_PROVIDER: observed HTTP 402' },
+  ],
 };
 
 afterEach(cleanup);

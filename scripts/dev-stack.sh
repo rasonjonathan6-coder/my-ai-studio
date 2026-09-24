@@ -126,6 +126,18 @@ start_backend() {
     local cf_account
     cf_account="$(sed -n 's/^CLOUDFLARE_ACCOUNT_ID=//p' "$ROOT/.env" | head -1)"
     [ -n "$cf_account" ] && or_args+=(-e "CLOUDFLARE_ACCOUNT_ID=$cf_account")
+    # FREE_ONLY and the per-provider free-model cap come from .env too, so the
+    # routing strategy can be flipped without editing this script. A non-empty
+    # value is forwarded as-is; absent means the config default applies.
+    local free_only free_attempts free_timeout max_output
+    free_only="$(sed -n 's/^FREE_ONLY=//p' "$ROOT/.env" | head -1)"
+    free_attempts="$(sed -n 's/^AI_MAX_FREE_MODEL_ATTEMPTS=//p' "$ROOT/.env" | head -1)"
+    free_timeout="$(sed -n 's/^AI_FREE_MODEL_TIMEOUT_MS=//p' "$ROOT/.env" | head -1)"
+    max_output="$(sed -n 's/^AI_MAX_OUTPUT_TOKENS=//p' "$ROOT/.env" | head -1)"
+    [ -n "$free_only" ] && or_args+=(-e "FREE_ONLY=$free_only")
+    [ -n "$free_attempts" ] && or_args+=(-e "AI_MAX_FREE_MODEL_ATTEMPTS=$free_attempts")
+    [ -n "$free_timeout" ] && or_args+=(-e "AI_FREE_MODEL_TIMEOUT_MS=$free_timeout")
+    [ -n "$max_output" ] && or_args+=(-e "AI_MAX_OUTPUT_TOKENS=$max_output")
   fi
   $DOCKER run -d --name "$API_CONTAINER" -p 8080:8080 --link "$PG_CONTAINER":pg \
     --group-add "$(socket_gid)" \

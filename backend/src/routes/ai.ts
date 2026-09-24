@@ -12,6 +12,10 @@ import { config } from '../config/index.ts';
 import { asyncHandler, validate } from '../middleware/validate.ts';
 import { requireAuth } from '../middleware/auth.ts';
 import { aiRouter, PROVIDER_IDS, isProviderId, type ProviderAdapter, type ProviderId } from '../services/aiProvider.ts';
+import {
+  listModels, registrySummary, syncOpenRouterCatalogue, observeModel, classifyHttp,
+  PROVIDER_TIERS, freeEligibleModels,
+} from '../services/modelRegistry.ts';
 import { logger, redact } from '../lib/logger.ts';
 
 const router = Router();
@@ -29,6 +33,11 @@ function providerSummary(): Array<{
   cooldownUntil: string | null;
   cooldownReason: string | null;
   capabilities: ReturnType<ProviderAdapter['capabilities']>;
+  /** Whether this provider can be used without billing, and why. */
+  tier: 'free' | 'paid';
+  tierReason: string;
+  /** Free models eligible under FREE_ONLY right now. */
+  freeModels: string[];
 }> {
   const cooldowns = aiRouter.cooldownState();
   return aiRouter.providers().map((p) => {
@@ -48,6 +57,9 @@ function providerSummary(): Array<{
       cooldownUntil: c.until,
       cooldownReason: c.reason,
       capabilities: p.capabilities(),
+      tier: PROVIDER_TIERS[p.id].tier,
+      tierReason: PROVIDER_TIERS[p.id].reason,
+      freeModels: PROVIDER_TIERS[p.id].tier === 'free' ? freeEligibleModels(p.id) : [],
     };
   });
 }
@@ -118,6 +130,10 @@ export function aiProviderStatus(): {
   recentAttempts: ReturnType<typeof aiRouter.recentAttempts>;
   requestCounters: ReturnType<typeof aiRouter.requestCounters>;
   quotaRemaining: 'unknown';
+  freeOnly: boolean;
+  models: ReturnType<typeof listModels>;
+  modelSummary: ReturnType<typeof registrySummary>;
+  freePlan: ReturnType<typeof aiRouter.freeModelPlan>;
 } {
   // The auto view is also used to drive the frontend selector, so paths are
   // reported per provider and no request is made here.
@@ -136,11 +152,135 @@ export function aiProviderStatus(): {
     // so that figure is reported as unknown instead of being invented.
     requestCounters: aiRouter.requestCounters(),
     quotaRemaining: 'unknown',
+    // FREE_ONLY is reported so the UI can say plainly whether paid models are
+    // reachable at all right now.
+    freeOnly: config.freeOnly,
+    models: listModels(),
+    modelSummary: registrySummary(),
+    freePlan: aiRouter.freeModelPlan(),
   };
 }
 
 router.get('/providers', requireAuth, asyncHandler(async (_req, res) => {
   res.json(aiProviderStatus());
+}));
+
+/**
+ * The model registry: which models exist, whether they are free, and what was
+ * last observed. Declared attributes each carry their evidence, and a model is
+ * never shown as AVAILABLE unless a real request returned 200 for it.
+ */
+router.get('/models', requireAuth, asyncHandler(async (req, res) => {
+  const provider = typeof req.query.provider === 'string' ? req.query.provider : undefined;
+  const freeOnly = req.query.free === 'true';
+  if (provider && !isProviderId(provider)) {
+    res.status(400).json({ error: 'unknown provider', allowed: PROVIDER_IDS });
+    return;
+  }
+  res.json({
+    providers: PROVIDER_TIERS,
+    models: listModels({ provider: provider as ProviderId | undefined, freeOnly }),
+    summary: registrySummary(),
+    freeOnly: config.freeOnly,
+  });
+}));
+
+/**
+ * Re-reads OpenRouter's public catalogue and refreshes which registered models
+ * are still priced at zero. This costs no completion quota: it is a plain read
+ * of a public endpoint. Kept explicit rather than scheduled so nothing spends
+ * quota on its own.
+ */
+router.post('/models/sync', requireAuth, asyncHandler(async (_req, res) => {
+  const result = await syncOpenRouterCatalogue();
+  logger.info('openrouter catalogue sync', {
+    ok: result.ok, free: result.freeIds.length, total: result.totalModels, missing: result.missing.length,
+  });
+  res.json({
+    ...result,
+    error: result.error ? redact(result.error).slice(0, 300) : undefined,
+    summary: registrySummary(),
+  });
+}));
+
+/**
+ * Live-probes one model with a real completion and records the observed status.
+ * Explicitly triggered: it spends quota, so it never runs on a schedule.
+ */
+const modelTestSchema = z.object({
+  provider: z.string().min(1).max(40),
+  model: z.string().min(1).max(200),
+});
+
+router.post('/models/test', requireAuth, asyncHandler(async (req, res) => {
+  const body = validate(modelTestSchema, req.body ?? {});
+  if (!isProviderId(body.provider)) {
+    res.status(400).json({ error: 'unknown provider', allowed: PROVIDER_IDS });
+    return;
+  }
+  if (!MODEL_PATTERN.test(body.model)) {
+    res.status(400).json({ error: 'invalid model id' });
+    return;
+  }
+  const adapter = aiRouter.adapter(body.provider);
+  if (!adapter.isConfigured()) {
+    res.json({
+      provider: body.provider, model: body.model, result: 'NOT_CONFIGURED',
+      http: null, status: 'NOT_CONFIGURED',
+      message: `${adapter.label} is not configured on the server.`,
+    });
+    return;
+  }
+
+  const started = Date.now();
+  const outcome = await adapter.chat({
+    messages: [{ role: 'user', content: 'Reply with exactly: OK' }],
+    model: body.model,
+    maxTokens: 400,
+    timeoutMs: 60_000,
+  });
+  const durationMs = Date.now() - started;
+  const httpStatus = outcome.ok ? 200 : outcome.status ?? null;
+  const observed = observeModel(body.provider, body.model, httpStatus, 'completion', outcome.ok ? null : outcome.message);
+
+  logger.info('ai model test', { provider: body.provider, model: body.model, http: httpStatus, ok: outcome.ok, durationMs });
+  res.json({
+    provider: body.provider,
+    model: body.model,
+    result: outcome.ok ? 'PASS' : 'FAIL',
+    // The status vocabulary the brief asks for, derived from the real HTTP code.
+    status: observed?.status ?? classifyHttp(httpStatus),
+    http: httpStatus,
+    classification: outcome.ok ? null : outcome.classification ?? null,
+    durationMs,
+    quotaCost: 'one completion',
+    reply: outcome.ok ? outcome.content.slice(0, 200) : undefined,
+    message: outcome.ok ? null : redact(outcome.message).slice(0, 400),
+  });
+}));
+
+/** Which free models FREE_ONLY would try right now, and which provider is skipped. */
+router.get('/free-plan', requireAuth, asyncHandler(async (_req, res) => {
+  res.json({
+    freeOnly: config.freeOnly,
+    maxFreeModelAttempts: config.aiMaxFreeModelAttempts,
+    plan: aiRouter.freeModelPlan(),
+  });
+}));
+
+/** The free models of one provider that FREE_ONLY may currently use. */
+router.get('/free-models/:id', requireAuth, asyncHandler(async (req, res) => {
+  const id = req.params.id;
+  if (!isProviderId(id)) {
+    res.status(400).json({ error: 'unknown provider', allowed: PROVIDER_IDS });
+    return;
+  }
+  res.json({
+    provider: id,
+    tier: PROVIDER_TIERS[id],
+    eligible: freeEligibleModels(id),
+    registered: listModels({ provider: id, freeOnly: true }),
+  });
 }));
 
 const testSchema = z.object({

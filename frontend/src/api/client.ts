@@ -1,7 +1,7 @@
 import type {
-  AgentRun, AiAutoProbeResponse, AiProviderProbeResult, AiProviderTestResult, AiProvidersResponse,
+  AgentRun, AiAutoProbeResponse, AiModel, AiModelTestResult, AiProviderProbeResult, AiProviderTestResult, AiProvidersResponse,
   BuildResult, CommandResult, Conversation,
-  ExportResult, FileEntry, GithubStatus, Message, PreviewResult, Project, ProviderSelection, SecurityScan, SystemStatus, User,
+  ExportResult, FileEntry, FreePlanEntry, GithubStatus, Message, ModelSummary, PreviewResult, Project, ProviderSelection, SecurityScan, SystemStatus, User,
 } from './types.ts';
 
 /** Re-exported so callers have a single import site for the contract types. */
@@ -121,6 +121,19 @@ export const api = {
   // One real request through the AUTO path, to observe the failover chain.
   autoProbeAi: () =>
     request<AiAutoProbeResponse>('/api/ai/providers/auto/auto-probe', { method: 'POST', ...json({}) }),
+  // Model registry. Read from the server; declared attributes carry evidence.
+  aiModels: (provider?: string) =>
+    request<{ models: AiModel[]; summary: ModelSummary; freeOnly: boolean }>(
+      `/api/ai/models${provider ? `?provider=${encodeURIComponent(provider)}` : ''}`),
+  // Re-reads OpenRouter's public catalogue: no key needed, no completion quota.
+  syncAiModels: () =>
+    request<{ ok: boolean; freeIds: string[]; missing: string[]; totalModels: number; error?: string; summary: ModelSummary }>(
+      '/api/ai/models/sync', { method: 'POST' }),
+  // One real completion for one model. Spends quota, so only ever on request.
+  testAiModel: (provider: string, model: string) =>
+    request<AiModelTestResult>('/api/ai/models/test', json({ provider, model })),
+  freePlan: () =>
+    request<{ freeOnly: boolean; maxFreeModelAttempts: number; plan: FreePlanEntry[] }>('/api/ai/free-plan'),
 
   // tests / builds
   runTests: (id: string) => request<{ test: { status: string; framework: string | null; command: string | null; passed: number; failed: number; skipped: number; durationMs: number; log: string; error: string | null } }>(`/api/projects/${id}/test`, { method: 'POST' }),

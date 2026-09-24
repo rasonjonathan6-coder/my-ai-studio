@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api/client.ts';
 import { Card, Empty, StatePill, Spinner } from '../components/ui.tsx';
+import { FreeModelsPanel } from '../components/FreeModels.tsx';
 import { AGENT_STEPS, stepIndex } from '../lib/steps.ts';
 import type { AgentRun, AiProvider, AiProvidersResponse, Message, ProviderId, ProviderSelection, WsEvent } from '../api/types.ts';
 
@@ -187,6 +188,10 @@ export function AiScreen({ projectId, socketConnected, events, onAgentState }: {
       </div>
 
       <div style={{ marginTop: 12 }}>
+        <FreeModelsPanel providers={providers} onError={setError} />
+      </div>
+
+      <div style={{ marginTop: 12 }}>
         <Card title="Conversation" actions={<button className="btn btn-ghost btn-sm" onClick={() => void load()}>Reload</button>}>
           {messages.length === 0 && <Empty>No messages yet.</Empty>}
           <div className="chat">
@@ -338,6 +343,14 @@ export function ProviderPanel({ providers, selected, onSelect, disabled, onChang
               <span>
                 {p.label}
                 <span className="muted" style={{ marginLeft: 6, fontSize: 12 }}>{s.label}</span>
+                <span className="muted" style={{ marginLeft: 6, fontSize: 11.5, opacity: 0.85 }}>
+                  {p.tier === 'free' ? 'FREE' : 'PAID'}
+                </span>
+                {st && st.lastStatusCode !== null && (
+                  <span className="muted" style={{ marginLeft: 6, fontSize: 11.5 }}>
+                    · {st.lastStatusCode === 429 ? 'RATE_LIMITED' : st.available ? 'AVAILABLE' : 'NOT_AVAILABLE'}
+                  </span>
+                )}
                 {p.cooling && st?.cooldownStrike ? (
                   <span className="muted" style={{ marginLeft: 6, fontSize: 12 }}>· backoff x{st.cooldownStrike}</span>
                 ) : null}

@@ -31,6 +31,7 @@ function build(mocks: Partial<Record<ProviderId, MockProvider>>): AiProviderRout
 const call = { messages: [{ role: 'user' as const, content: 'hi' }] };
 
 beforeEach(() => {
+  config.freeOnly = false;
   config.aiProviderPriority = [...PRIORITY];
   config.aiProviderCooldownMs = 30_000;
   config.aiProviderCooldownMaxMs = 900_000;

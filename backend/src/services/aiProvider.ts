@@ -19,6 +19,10 @@ import {
   cerebras, chutes, cloudflare, huggingface, mistral, nvidia, ollama, sambanova, vllm,
   type ProviderService,
 } from './providers.ts';
+import {
+  PROVIDER_TIERS, freeEligibleModels, observeModel, modelKey,
+  type ProviderTier,
+} from './modelRegistry.ts';
 import type { ChatFailure, ChatOptions, ChatOutcome, ProviderCapabilities } from './providerClient.ts';
 
 /**
@@ -199,6 +203,12 @@ export interface RoutedFailure {
   /** True when the failure was a hard quota rather than a short throttle. */
   quotaExhausted: boolean;
   attempts: AttemptRecord[];
+  /**
+   * Machine-readable reason when the failure is a routing decision rather than
+   * a provider error. Set to NO_FREE_PROVIDER_AVAILABLE when FREE_ONLY had no
+   * free model left to try - the caller must not read that as a paid fallback.
+   */
+  code?: 'NO_FREE_PROVIDER_AVAILABLE';
 }
 
 export type RoutedOutcome = RoutedResult | RoutedFailure;
@@ -224,6 +234,12 @@ function isTransientFailure(failure: ChatFailure): boolean {
 
 export class AiProviderRouter {
   private readonly cooldowns = new Map<ProviderId, CooldownEntry>();
+  /**
+   * Per-model cooldowns, keyed `provider:model`. A free model is rate-limited on
+   * its own upstream, so one throttled variant must not remove its whole
+   * provider from rotation - that would waste the other free models.
+   */
+  private readonly modelCooldowns = new Map<string, number>();
   private readonly history: AttemptRecord[] = [];
   private readonly maxHistory = 100;
   private readonly counters = new Map<ProviderId, RequestCounter>();
@@ -331,6 +347,155 @@ export class AiProviderRouter {
   public clearCooldown(id?: ProviderId): void {
     if (id) this.cooldowns.delete(id);
     else this.cooldowns.clear();
+  }
+
+  /** Per-model cooldown helpers, keyed `provider:model`. */
+  public isModelCooling(provider: ProviderId, model: string, now = Date.now()): boolean {
+    const until = this.modelCooldowns.get(modelKey(provider, model));
+    return until !== undefined && until > now;
+  }
+
+  private enterModelCooldown(provider: ProviderId, model: string, failure: ChatFailure): void {
+    const base = config.aiProviderCooldownMs;
+    const ms = Math.max(base, failure.retryAfterMs ?? 0);
+    this.modelCooldowns.set(modelKey(provider, model), Date.now() + ms);
+  }
+
+  public clearModelCooldowns(): void {
+    this.modelCooldowns.clear();
+  }
+
+  /** Free models each provider could be sent to right now, plus why not. */
+  public freeModelPlan(now = Date.now()): Array<{
+    provider: ProviderId;
+    label: string;
+    tier: ProviderTier;
+    candidates: string[];
+    skippedReason: string | null;
+  }> {
+    const { ready, cooling, unconfigured } = this.autoOrder(now);
+    const usable = [...ready, ...cooling];
+    return usable.map((id) => {
+      const entry = PROVIDER_TIERS[id];
+      const candidates = entry.tier === 'free'
+        ? freeEligibleModels(id).filter((m) => !this.isModelCooling(id, m, now)).slice(0, config.aiMaxFreeModelAttempts)
+        : [];
+      return {
+        provider: id,
+        label: this.table[id].label,
+        tier: entry.tier,
+        candidates,
+        skippedReason: entry.tier !== 'free'
+          ? `PAID_PROVIDER: ${entry.reason}`
+          : candidates.length === 0
+            ? 'no free model is currently eligible'
+            : null,
+      };
+    }).concat(unconfigured.map((id) => ({
+      provider: id,
+      label: this.table[id].label,
+      tier: PROVIDER_TIERS[id].tier,
+      candidates: [] as string[],
+      skippedReason: 'NOT_CONFIGURED',
+    })));
+  }
+
+  /**
+   * FREE_ONLY routing: a request may only reach a free provider and a free
+   * model. A paid provider is never contacted, even as a last resort - if the
+   * free pool is exhausted the call fails with NO_FREE_PROVIDER_AVAILABLE so
+   * the operator sees the truth rather than a charge.
+   *
+   * Each free model of a provider is tried in turn (a throttled variant does not
+   * condemn its siblings), bounded by aiMaxFreeModelAttempts and by the
+   * per-model cooldown.
+   */
+  private async chatFreeOnly(
+    options: ChatOptions,
+    onAttempt?: (record: AttemptRecord) => void,
+  ): Promise<RoutedOutcome> {
+    const attempts: AttemptRecord[] = [];
+    const plan = this.freeModelPlan();
+    const eligible = plan.filter((p) => p.candidates.length > 0);
+    const paidSkipped = plan.filter((p) => p.tier === 'paid').length;
+
+    if (eligible.length === 0) {
+      const detail = paidSkipped > 0
+        ? `${paidSkipped} configured provider(s) are paid-only and were not contacted`
+        : 'no free model passed its provider checks';
+      return {
+        ok: false, provider: null, providerLabel: null, kind: 'not_configured',
+        message: `NO_FREE_PROVIDER_AVAILABLE: ${detail}`,
+        retryable: false, quotaExhausted: false, attempts,
+        code: 'NO_FREE_PROVIDER_AVAILABLE',
+      };
+    }
+
+    let firstTried: ProviderId | null = null;
+    let lastFailure: RoutedFailure | null = null;
+
+    for (const stage of eligible) {
+      const adapter = this.table[stage.provider];
+      firstTried ??= stage.provider;
+      let providerWideFailure = false;
+
+      for (const model of stage.candidates) {
+        // A free model may stall: bound each attempt so a single unresponsive
+        // variant cannot consume the run's whole time budget before failover.
+        const outcome = await adapter.chat({
+          ...options,
+          model,
+          timeoutMs: Math.min(options.timeoutMs ?? config.aiFreeModelTimeoutMs, config.aiFreeModelTimeoutMs),
+        });
+        const record = this.record(attempts, adapter, outcome, model);
+        onAttempt?.(record);
+
+        if (outcome.ok) {
+          return {
+            ...outcome,
+            provider: adapter.id,
+            providerLabel: adapter.label,
+            attempts,
+            failoverFrom: firstTried !== adapter.id ? firstTried : null,
+          };
+        }
+
+        lastFailure = {
+          ok: false,
+          provider: adapter.id,
+          providerLabel: adapter.label,
+          kind: outcome.kind,
+          message: outcome.message,
+          retryable: outcome.retryable,
+          quotaExhausted: outcome.quotaExhausted === true,
+          attempts,
+        };
+
+        // A request or credential problem is not a reason to burn the other
+        // free models on the same malformed request.
+        if (!isTransientFailure(outcome)) {
+          providerWideFailure = true;
+          break;
+        }
+        // A limit on this specific variant only cools that variant down; the
+        // next free model of the same provider may well answer.
+        this.enterModelCooldown(adapter.id, model, outcome);
+        logger.warn('free model failover', { provider: adapter.id, model, kind: outcome.kind, status: outcome.status });
+      }
+
+      if (providerWideFailure) {
+        this.enterCooldown(adapter.id, lastFailure ?? {
+          ok: false, kind: 'http_error', message: 'provider request failed', retryable: false,
+        });
+        break;
+      }
+    }
+
+    return lastFailure ?? {
+      ok: false, provider: null, providerLabel: null, kind: 'network_error',
+      message: 'no free model produced a response', retryable: true, quotaExhausted: false, attempts,
+      code: 'NO_FREE_PROVIDER_AVAILABLE',
+    };
   }
 
   /**
@@ -464,6 +629,26 @@ export class AiProviderRouter {
     options: ChatOptions,
     onAttempt?: (record: AttemptRecord) => void,
   ): Promise<RoutedOutcome> {
+    // FREE_ONLY is a routing strategy, not a preference: it overrides both 'auto'
+    // and a pinned provider so a paid provider can never be reached by accident.
+    // A pinned *paid* provider is refused explicitly rather than silently ignored.
+    if (config.freeOnly) {
+      if (selection !== 'auto' && isProviderId(selection) && PROVIDER_TIERS[selection].tier === 'paid') {
+        return {
+          ok: false,
+          provider: selection,
+          providerLabel: this.table[selection].label,
+          kind: 'not_configured',
+          message: `FREE_ONLY: ${this.table[selection].label} is a paid provider and will not be contacted. ${PROVIDER_TIERS[selection].reason}`,
+          retryable: false,
+          quotaExhausted: false,
+          attempts: [],
+          code: 'NO_FREE_PROVIDER_AVAILABLE',
+        };
+      }
+      return this.chatFreeOnly(options, onAttempt);
+    }
+
     const attempts: AttemptRecord[] = [];
 
     if (selection !== 'auto') {
@@ -581,11 +766,12 @@ export class AiProviderRouter {
     });
   }
 
-  private record(attempts: AttemptRecord[], adapter: ProviderAdapter, outcome: ChatOutcome): AttemptRecord {
+  private record(attempts: AttemptRecord[], adapter: ProviderAdapter, outcome: ChatOutcome, modelOverride?: string): AttemptRecord {
     const status = adapter.status();
+    const model = modelOverride ?? (outcome.ok ? outcome.model : status.model);
     const record: AttemptRecord = {
       provider: adapter.id,
-      model: outcome.ok ? outcome.model : status.model,
+      model,
       endpoint: status.baseUrl,
       outcome: outcome.ok ? 'ok' : isTransientFailure(outcome) ? 'fallback' : 'error',
       status: outcome.ok ? 200 : outcome.status,
@@ -595,6 +781,12 @@ export class AiProviderRouter {
       at: new Date().toISOString(),
     };
     attempts.push(record);
+    // The registry learns what this model really did. Only a resolved status is
+    // recorded, so nothing is marked available without a response behind it.
+    const httpStatus = outcome.ok ? 200 : outcome.status ?? null;
+    if (httpStatus !== null) {
+      observeModel(adapter.id, model, httpStatus, 'completion', outcome.ok ? null : outcome.message);
+    }
     this.countAttempt(adapter.id, outcome.ok);
     if (outcome.ok) this.noteSuccess(adapter.id, outcome);
     else this.noteObservedFailure(adapter.id, outcome);

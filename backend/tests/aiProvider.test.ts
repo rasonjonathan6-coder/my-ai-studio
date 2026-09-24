@@ -85,6 +85,9 @@ after(async () => {
 
 beforeEach(() => {
   router = new AiProviderRouter();
+  // Pinned explicitly: FREE_ONLY is a config toggle, and a stray value in the
+  // environment must not change what these routing tests exercise.
+  config.freeOnly = false;
   orP.set(ok());
   gemP.set(ok());
   groqP.set(ok());

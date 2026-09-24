@@ -4,6 +4,7 @@ import { getSystemStatus } from '../services/systemStatus.ts';
 import { config } from '../config/index.ts';
 import { openRouter } from '../services/openrouter.ts';
 import { aiRouter } from '../services/aiProvider.ts';
+import { PROVIDER_TIERS, registrySummary } from '../services/modelRegistry.ts';
 import { aiProviderStatus } from './ai.ts';
 import { jobQueue } from '../services/jobQueue.ts';
 import { eventBus } from '../services/eventBus.ts';
@@ -36,6 +37,16 @@ router.get('/health', asyncHandler(async (_req, res) => {
     // Kept for existing clients that read this single field.
     openrouter: openRouter.isConfigured() ? 'configured' : 'not_configured',
     providers: providerConfigState(),
+    // Whether the paid providers are reachable at all. Reported so a caller can
+    // tell a "no free model worked" failure from a total outage.
+    freeOnly: config.freeOnly,
+    free: {
+      providers: (Object.entries(PROVIDER_TIERS) as Array<[string, { tier: string }]>)
+        .filter(([, v]) => v.tier === 'free').map(([k]) => k),
+      paidExcluded: (Object.entries(PROVIDER_TIERS) as Array<[string, { tier: string }]>)
+        .filter(([, v]) => v.tier === 'paid').map(([k]) => k),
+      freeModels: registrySummary().freeModels,
+    },
     time: new Date().toISOString(),
   });
 }));

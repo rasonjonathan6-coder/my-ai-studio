@@ -102,6 +102,64 @@ export interface AiProvider {
   cooldownUntil: string | null;
   cooldownReason: string | null;
   capabilities: ProviderCapabilities;
+  /** Whether this provider is usable without billing, and the reason. */
+  tier: 'free' | 'paid';
+  tierReason: string;
+  /** Free models FREE_ONLY may use on this provider right now. */
+  freeModels: string[];
+}
+
+/** Status vocabulary, derived from the HTTP code a real request returned. */
+export type ModelStatus =
+  | 'NOT_TESTED' | 'AVAILABLE' | 'RATE_LIMITED' | 'PAYMENT_REQUIRED'
+  | 'FORBIDDEN' | 'MODEL_NOT_FOUND' | 'DEPRECATED' | 'ERROR';
+
+export interface AiModel {
+  id: string;
+  provider: ProviderId;
+  free: boolean;
+  coding: boolean;
+  tools: boolean;
+  context: number | null;
+  /** The source for the declared attributes above. */
+  evidence: string;
+  status: ModelStatus;
+  lastHttpStatus: number | null;
+  lastTested: string | null;
+  lastMessage: string | null;
+  observedVia: 'completion' | 'catalogue' | null;
+}
+
+export interface ModelSummary {
+  freeProviders: number;
+  freeModels: number;
+  available: number;
+  rateLimited: number;
+  paymentRequired: number;
+  notAvailable: number;
+  notTested: number;
+  lastSync: { ok: boolean; at: string; freeIds: string[]; missing: string[]; totalModels: number; error?: string } | null;
+}
+
+export interface FreePlanEntry {
+  provider: ProviderId;
+  label: string;
+  tier: 'free' | 'paid';
+  candidates: string[];
+  skippedReason: string | null;
+}
+
+export interface AiModelTestResult {
+  provider: string;
+  model: string;
+  result: 'PASS' | 'FAIL' | 'NOT_CONFIGURED';
+  status: ModelStatus | 'NOT_CONFIGURED';
+  http: number | null;
+  classification?: string | null;
+  durationMs?: number;
+  quotaCost?: string;
+  reply?: string;
+  message?: string | null;
 }
 
 /** Live per-provider state. Unknown values are null, never guessed. */
@@ -158,6 +216,11 @@ export interface AiProvidersResponse {
   requestCounters: Record<string, { date: string; attempts: number; ok: number; failed: number }>;
   /** Always 'unknown': no provider API exposes a remaining-quota figure. */
   quotaRemaining: 'unknown';
+  /** True when paid providers and models are excluded from every route. */
+  freeOnly: boolean;
+  models: AiModel[];
+  modelSummary: ModelSummary;
+  freePlan: FreePlanEntry[];
 }
 
 export interface AiProviderTestResult {

@@ -234,3 +234,30 @@ Tests must not depend on the machine's `.env`. `aiProvider.test.ts` blanks every
 provider credential before asserting `not_configured`, otherwise a developer with
 providers configured turns a unit test into a real network call.
 
+## FREE_ONLY agent runs
+
+A free model can stall without failing. The router tries several models per
+provider, so one unresponsive variant used to consume the whole run budget and
+the run sat in `analyzing` with `tokens_in = 0` while the provider retry log
+filled up. `AI_FREE_MODEL_TIMEOUT_MS` (default 45s) now caps each attempt so a
+stall rolls over to the next candidate.
+
+Reasoning models on the free pool bill their reasoning trace against the output
+budget. With no `max_tokens` set, `cohere/north-mini-code:free` returned HTTP 200
+with `content: null` (all 20 tokens went to reasoning), which the adapter read as
+`invalid_response`. The agent loop now sends `AI_MAX_OUTPUT_TOKENS` (default
+2048) so the answer has room.
+
+The agent's `run_command` tool used to call `runCommand` directly, bypassing
+`terminal.ts`. Agent commands therefore never reached the `commands` table and
+were invisible in the terminal view even though they really ran. It now goes
+through `runTerminalCommand` with `source: 'agent'`; the read-only `git_status`
+and `git_diff` tools still use `runCommand` since they are not auditable work.
+
+`002_agent_runs_provider.sql` pinned `agent_runs.provider` to three providers. A
+run served by a newer provider - or refused by FREE_ONLY before any request -
+failed that CHECK and the terminal status could not be written, so the run looked
+stuck. Migration `003_agent_runs_provider_all.sql` widens both provider columns
+to the full router set. When adding a provider, this constraint list is one of
+the places that must be updated.
+

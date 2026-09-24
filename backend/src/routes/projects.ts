@@ -18,7 +18,7 @@ import { scanProject } from '../services/securityScan.ts';
 import { previewApk } from '../services/androidPreview.ts';
 import { inspectApk } from '../services/apkInspect.ts';
 import { enqueueAgentRun } from '../agent/loop.ts';
-import { aiRouter, isProviderSelection } from '../services/aiProvider.ts';
+import { aiRouter, isProviderId, isProviderSelection } from '../services/aiProvider.ts';
 import { query } from '../db/pool.ts';
 import { jobQueue } from '../services/jobQueue.ts';
 import { PathSecurityError } from '../lib/paths.ts';
@@ -285,13 +285,20 @@ router.get('/:id/terminal', asyncHandler(async (req, res) => {
 
 const agentSchema = z.object({
   prompt: z.string().min(1).max(8000),
-  // 'auto' lets the router pick and fail over; a provider id pins the run.
-  provider: z.enum(['auto', 'openrouter', 'gemini', 'groq']).optional(),
+  // 'auto' lets the router pick and fail over; a provider id pins the run. The
+  // set is validated against the router's own registry rather than a hand-written
+  // list, which had drifted and rejected providers the router actually supports.
+  provider: z.string().max(40).optional(),
 });
 
 router.post('/:id/agent/run', agentLimiter, asyncHandler(async (req, res) => {
   const project = await loadOwnedProject(req);
   const body = validate(agentSchema, req.body);
+  // The router is the authority on which providers exist; an unknown id is a
+  // client error rather than a run that silently falls back to AUTO.
+  if (body.provider !== undefined && body.provider !== 'auto' && !isProviderId(body.provider)) {
+    throw new HttpError(400, `unknown provider: ${body.provider}`, 'unknown_provider');
+  }
   const provider = body.provider ?? (isProviderSelection(config.aiDefaultProvider) ? config.aiDefaultProvider : 'auto');
   const conversation = await getOrCreateConversation(project!.id, req.user!.id);
   await addMessage(conversation.id, 'user', body.prompt);

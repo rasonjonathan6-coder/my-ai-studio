@@ -384,3 +384,31 @@ the types are fine.
 returns its path, entry count, size and sha256; `GET .../download/zip` streams a
 fresh archive. A `GET` against the export path 404s, which reads like a missing
 feature but is a wrong verb.
+
+**An in-app Android build needs two sandbox mounts, not one.** `gradle` is
+absent by design (projects use their own wrapper), so a failing Android build is
+never about the `gradle` binary. What bites is the cache. If the configured
+`GRADLE_USER_HOME` is not writable inside the sandbox, `toolchainEnv()` logs
+`configured GRADLE_USER_HOME is not writable in the sandbox; using an ephemeral
+cache` and falls back to `/tmp/gradle-home`. But `commandRunner.ts` mounts `/tmp`
+as `--tmpfs /tmp:rw,exec,size=512m`, so Gradle's cache outgrows it and the build
+dies with:
+
+```
+Exception: Could not add entry '...transforms/.../results.bin'
+to cache fileHashes.bin (.../fileHashes/fileHashes.bin)
+```
+
+That error mentions neither disk space nor ENOSPC, so it reads like a corrupt
+cache. It is an exhausted tmpfs. Fix by supplying both mounts, and make the cache
+directory writable by uid 1000 (the sandbox user):
+
+```
+SANDBOX_EXTRA_MOUNTS=/host/android-sdk:/opt/android-sdk:ro,/host/gradle:/home/node/.gradle
+ANDROID_HOME=/opt/android-sdk
+INSTALL_ANDROID_TOOLCHAIN=1
+```
+
+With a writable cache the fallback is not logged and builds succeed. Symptom to
+watch for: the `not writable` warning appearing immediately before a build
+failure is the whole diagnosis.

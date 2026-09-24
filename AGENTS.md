@@ -191,3 +191,36 @@ than `.dev-credentials` holds, TCP auth fails while the postgres superuser still
 works over the local socket; reset with
 `docker exec mas-pg psql -U studio -d myaistudio -c "ALTER ROLE studio WITH PASSWORD '...'"`.
 
+## Provider keys and the dev stack
+
+Provider credentials go in the gitignored `.env` only. `scripts/dev-stack.sh`
+forwards them into the backend container from an explicit list, so adding a key
+is not enough on its own - a provider missing from that list looks identical to
+an unconfigured one. Cloudflare is the exception to the key/model pair shape: it
+needs `CLOUDFLARE_ACCOUNT_ID` too, because the account id is part of the
+OpenAI-compatible path (without it `baseUrl` is empty and the client fails with
+"Failed to parse URL from /chat/completions").
+
+Never trust a default model id to still exist. `GET /v1/models` on the provider
+is the authority, and a key can be perfectly valid while both the model and the
+account entitlement are wrong - the failure code tells them apart:
+
+| Response | Meaning |
+| --- | --- |
+| 401 | key or token rejected |
+| 402 / 429 | key valid, no credit or quota |
+| 404 `not available on X` | model id wrong, or not entitled on this account |
+| 410 | model listed but retired |
+
+Observed on this workspace: Cerebras listed only `gpt-oss-120b` (the old default
+was retired); Mistral answered 429 quota exhausted; Cloudflare's token
+authenticated for `/accounts` but Workers AI refused it (needs the Workers AI
+permission) and no account id was set; NVIDIA's key worked but the account had no
+entitlement to any chat model tried - every id either 404'd or had reached end of
+life. Only the operator can fix entitlement and billing; the code reports the
+classification honestly rather than retrying forever.
+
+Tests must not depend on the machine's `.env`. `aiProvider.test.ts` blanks every
+provider credential before asserting `not_configured`, otherwise a developer with
+providers configured turns a unit test into a real network call.
+

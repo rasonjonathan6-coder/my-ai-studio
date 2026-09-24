@@ -79,6 +79,7 @@ jobs:
           fi
 
       - name: Run unit tests
+        id: unit_tests
         run: |
           # Each sample is a standalone Gradle project with its own wrapper;
           # android-samples/ itself has no settings.gradle.
@@ -87,6 +88,11 @@ jobs:
             echo "=== test: $s ==="
             ./android-samples/$s/gradlew -p "android-samples/$s" test --console=plain --no-daemon
           done
+          # Only reached when every suite passed: `set -e` aborts the step
+          # otherwise, and the packaging steps below are what carry this value
+          # into BUILD_INFO.txt. A failed suite therefore never yields a
+          # BUILD_INFO claiming SUCCESS.
+          echo "result=SUCCESS" >> "$GITHUB_OUTPUT"
 
       - name: Assemble debug APK
         run: |
@@ -171,11 +177,54 @@ jobs:
           fi
           echo "source secret scan: clean"
 
+      - name: Package APKs with build metadata
+        run: |
+          set -e
+          # Collected individually (not via `cp -r`) so the three required files
+          # are guaranteed present; `if-no-files-found: error` on the upload step
+          # then fails the job rather than shipping an empty artifact.
+          mkdir -p apk-artifact
+          apks=$(find android-samples -path '*/build/outputs/apk/debug/*.apk' -type f | sort)
+          count=$(echo "$apks" | grep -c . || true)
+          [ "$count" -gt 0 ] || { echo "BUILD FAILED: no APK to package"; exit 1; }
+          for apk in $apks; do
+            sample=$(echo "$apk" | cut -d/ -f2)
+            cp "$apk" "apk-artifact/${sample}-app-debug.apk"
+          done
+          ( cd apk-artifact && sha256sum ./*.apk > SHA256SUMS.txt )
+          # APK name, size and digest for each built sample.
+          {
+            echo "commit: ${{ github.sha }}"
+            echo "branch: ${{ github.ref_name }}"
+            echo "built_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "run_number: ${{ github.run_number }}"
+            echo "java: $(java -version 2>&1 | head -1)"
+            echo "gradle_wrapper: $(grep distributionUrl android-samples/hello/gradle/wrapper/gradle-wrapper.properties | cut -d= -f2 | tr -d '\\')"
+            echo "android_gradle_plugin: $(grep 'com.android.application' android-samples/hello/build.gradle.kts | grep -oE 'version \"[0-9.]+\"' | head -1)"
+            echo "unit_tests: ${{ steps.unit_tests.outputs.result }}"
+            echo "samples: ${{ steps.pick.outputs.samples }}"
+            for apk in $apks; do
+              sample=$(echo "$apk" | cut -d/ -f2)
+              echo "apk: ${sample}-app-debug.apk"
+              echo "size_bytes: $(stat -c%s "$apk")"
+              echo "sha256: $(sha256sum "$apk" | awk '{print $1}')"
+            done
+          } > apk-artifact/BUILD_INFO.txt
+          echo "--- apk-artifact ---"
+          ls -l apk-artifact
+          cat apk-artifact/BUILD_INFO.txt
+          # The artifact must never carry secrets.
+          if grep -rIlE 'sk-or-[A-Za-z0-9]|OPENROUTER_API_KEY|api_key=|apikey=|password=|private_key|secret=' apk-artifact; then
+            echo "SECURITY FAILED: secret-like content in the APK artifact"
+            exit 1
+          fi
+          echo "artifact secret scan: clean"
+
       - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
-          name: debug-apks
-          path: android-samples/**/build/outputs/apk/debug/*.apk
+          name: my-ai-studio-debug-apk
+          path: apk-artifact/
           retention-days: 14
           if-no-files-found: error
 

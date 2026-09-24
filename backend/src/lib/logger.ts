@@ -5,7 +5,10 @@ type Level = keyof typeof LEVELS;
 
 const SECRET_PATTERNS: RegExp[] = [
   /sk-or-[A-Za-z0-9_-]{8,}/g,
+  // GitHub tokens: classic (ghp_/gho_/ghs_/ghu_/ghr_) and fine-grained (github_pat_).
+  /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g,
   /(OPENROUTER_API_KEY\s*[=:]\s*)\S+/gi,
+  /(GITHUB_TOKEN\s*[=:]\s*)\S+/gi,
   /(DATABASE_URL\s*[=:]\s*)\S+/gi,
   /(JWT_SECRET\s*[=:]\s*)\S+/gi,
   /(password\s*[=:]\s*)\S+/gi,
@@ -24,6 +27,9 @@ export function redact(input: string): string {
   }
   if (config.openRouterApiKey) {
     out = out.split(config.openRouterApiKey).join('[REDACTED]');
+  }
+  if (config.githubToken) {
+    out = out.split(config.githubToken).join('[REDACTED]');
   }
   const dbPassword = extractDbPassword(config.databaseUrl);
   if (dbPassword) out = out.split(dbPassword).join('[REDACTED]');

@@ -19,3 +19,4 @@ release/
 .agent_tmp/
 *.tsbuildinfo
 .dev-credentials
+apk-artifact/

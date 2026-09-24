@@ -292,6 +292,41 @@ export interface ExportResult {
   error: string | null;
 }
 
+export interface GithubRun {
+  id: number;
+  name: string;
+  workflowName: string | null;
+  runNumber: number;
+  status: string;
+  conclusion: string | null;
+  headBranch: string;
+  headSha: string;
+  event: string;
+  createdAt: string;
+  updatedAt: string;
+  htmlUrl: string;
+}
+
+export interface GithubArtifact {
+  id: number;
+  name: string;
+  sizeInBytes: number;
+  expired: boolean;
+  createdAt: string;
+  downloadable: boolean;
+  archiveDownloadUrl: string | null;
+}
+
+export interface GithubStatus {
+  state: 'CONFIGURED' | 'NOT_CONFIGURED' | 'AVAILABLE' | 'ERROR' | 'NOT_TESTED';
+  connected: boolean;
+  repo: string | null;
+  tokenConfigured: boolean;
+  detail: string | null;
+  latestRun: GithubRun | null;
+  latestArtifacts: GithubArtifact[];
+}
+
 export interface WsEvent {
   type: string;
   projectId?: string;

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, downloadUrl } from '../api/client.ts';
+import { api, downloadUrl, githubArtifactUrl } from '../api/client.ts';
 import { Card, Empty, StatePill, bytes, when } from '../components/ui.tsx';
-import type { ApkInspection, BuildResult, SecurityScan, SystemStatus, WsEvent } from '../api/types.ts';
+import type { ApkInspection, BuildResult, GithubStatus, SecurityScan, SystemStatus, WsEvent } from '../api/types.ts';
 
 interface TestSummary {
   status: string; framework: string | null; command: string | null;
@@ -13,6 +13,7 @@ export function BuildScreen({ projectId, events }: { projectId: string; events: 
   const [test, setTest] = useState<TestSummary | null>(null);
   const [build, setBuild] = useState<BuildResult | null>(null);
   const [scan, setScan] = useState<SecurityScan | null>(null);
+  const [github, setGithub] = useState<GithubStatus | null>(null);
   const [inspection, setInspection] = useState<ApkInspection | null>(null);
   const [busy, setBusy] = useState<{ test?: boolean; build?: boolean; scan?: boolean }>({});
   const [error, setError] = useState<string | null>(null);
@@ -47,7 +48,17 @@ export function BuildScreen({ projectId, events }: { projectId: string; events: 
     }
   }, [projectId]);
 
-  useEffect(() => { void loadStatus(); void loadArtifacts(); }, [loadStatus, loadArtifacts]);
+  const loadGithub = useCallback(async () => {
+    try {
+      setGithub(await api.github());
+    } catch {
+      // An unconfigured or unreachable integration is not a page error; the
+      // card reports the real state once loaded.
+      setGithub(null);
+    }
+  }, []);
+
+  useEffect(() => { void loadStatus(); void loadArtifacts(); void loadGithub(); }, [loadStatus, loadArtifacts, loadGithub]);
 
   // Build and test log frames for this project, streamed live.
   useEffect(() => {
@@ -215,6 +226,50 @@ export function BuildScreen({ projectId, events }: { projectId: string; events: 
           </Card>
         </div>
       )}
+
+      <div style={{ marginTop: 12 }}>
+        <Card
+          title="GitHub Actions"
+          subtitle="Status of the latest workflow run on the configured repository. CI runs on GitHub; nothing here is simulated."
+          actions={<button className="btn btn-ghost btn-sm" onClick={() => void loadGithub()}>REFRESH</button>}
+        >
+          {!github && <Empty>GitHub integration state could not be read.</Empty>}
+          {github && (
+            <>
+              <div className="row">
+                <StatePill value={github.state} />
+                <span className="hint mono">{github.repo ?? 'no repository set'}</span>
+              </div>
+              <div className="kv"><span>token on server</span><span>{github.tokenConfigured ? 'present' : 'absent'}</span></div>
+              {github.detail && <p className="hint" style={{ marginTop: 6 }}>{github.detail}</p>}
+              {github.latestRun ? (
+                <>
+                  <div className="kv"><span>workflow</span><span>{github.latestRun.workflowName ?? github.latestRun.name} #{github.latestRun.runNumber}</span></div>
+                  <div className="kv"><span>status</span><span>{github.latestRun.status}{github.latestRun.conclusion ? ` · ${github.latestRun.conclusion}` : ''}</span></div>
+                  <div className="kv"><span>branch / event</span><span>{github.latestRun.headBranch} · {github.latestRun.event}</span></div>
+                  <div className="kv"><span>commit</span><span className="mono">{github.latestRun.headSha.slice(0, 12)}</span></div>
+                  <a className="btn btn-ghost btn-block" style={{ marginTop: 8 }} href={github.latestRun.htmlUrl} target="_blank" rel="noreferrer">Open run on GitHub</a>
+                  {github.latestArtifacts.length > 0 ? (
+                    <div style={{ marginTop: 10 }}>
+                      <p className="hint">Artifacts from this run</p>
+                      {github.latestArtifacts.map((a) => (
+                        <div className="kv" key={a.id}>
+                          <span>{a.name} · {bytes(a.sizeInBytes)}{a.expired ? ' · expired' : ''}</span>
+                          <span>{a.downloadable ? <a href={githubArtifactUrl(a.id)}>download</a> : 'unavailable'}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="hint" style={{ marginTop: 8 }}>No artifacts attached to the latest run.</p>
+                  )}
+                </>
+              ) : (
+                github.state === 'AVAILABLE' && <p className="hint" style={{ marginTop: 8 }}>No workflow run found on the configured repository.</p>
+              )}
+            </>
+          )}
+        </Card>
+      </div>
 
       <div style={{ marginTop: 12 }}>
         <Card

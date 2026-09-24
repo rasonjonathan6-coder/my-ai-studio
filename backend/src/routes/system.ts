@@ -9,6 +9,8 @@ import { jobQueue } from '../services/jobQueue.ts';
 import { eventBus } from '../services/eventBus.ts';
 import { checkDatabase } from '../db/pool.ts';
 import { checkEmulator } from '../services/androidPreview.ts';
+import { getGithubStatus, downloadArtifact } from '../services/githubActions.ts';
+import { requireAuth } from '../middleware/auth.ts';
 
 const router = Router();
 
@@ -116,6 +118,55 @@ router.get('/system/emulator', asyncHandler(async (_req, res) => {
       ? 'An emulator/device is reachable through adb.'
       : 'No emulator is attached. Android preview and instrumentation tests are NOT AVAILABLE in this environment.',
   });
+}));
+
+router.get('/system/github', requireAuth, asyncHandler(async (_req, res) => {
+  const status = await getGithubStatus();
+  res.json(status);
+}));
+
+/**
+ * Proxies a GitHub Actions artifact through the backend so the token is never
+ * handed to the browser. Requires authentication: the route is mounted under
+ * the same auth middleware as the rest of the API.
+ */
+router.get('/system/github/artifacts/:artifactId', requireAuth, asyncHandler(async (req, res) => {
+  const raw = String(req.params.artifactId ?? '');
+  const artifactId = Number.parseInt(raw, 10);
+  if (!Number.isSafeInteger(artifactId) || artifactId <= 0) {
+    res.status(400).json({ error: 'artifactId must be a positive integer' });
+    return;
+  }
+  const status = await getGithubStatus();
+  if (!status.connected || !status.repo) {
+    res.status(503).json({ error: 'GitHub integration is not available', detail: status.detail });
+    return;
+  }
+  // Only artifacts belonging to the repository's latest run are servable, which
+  // keeps the route from becoming an arbitrary fetch proxy.
+  if (!status.latestArtifacts.some((a) => a.id === artifactId)) {
+    res.status(404).json({ error: 'artifact does not belong to the latest workflow run of the configured repository' });
+    return;
+  }
+  const artifact = status.latestArtifacts.find((a) => a.id === artifactId);
+  if (artifact?.expired) {
+    res.status(410).json({ error: 'artifact has expired' });
+    return;
+  }
+  const result = await downloadArtifact(status.repo, artifactId);
+  if (!result.ok || !result.body) {
+    res.status(502).json({ error: 'artifact download failed', detail: result.error ?? null });
+    return;
+  }
+  res.setHeader('Content-Type', result.contentType);
+  res.setHeader('Content-Disposition', `attachment; filename="${artifact?.name ?? 'artifact'}.zip"`);
+  const reader = result.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    res.write(Buffer.from(value));
+  }
+  res.end();
 }));
 
 export default router;

@@ -84,7 +84,7 @@ export function SettingsScreen({ user, onLogout }: { user: User; onLogout: () =>
             <div className="kv"><span>storage root</span><span>{info.config.storageRoot}</span></div>
             <div className="kv">
               <span>JWT secret</span>
-              <span>{info.config.jwtSecretGenerated ? 'generated for this process (set JWT_SECRET in production)' : 'provided by environment'}</span>
+              <span>{info.config.jwtSecretGenerated ? 'generated for this process (configure a secret in production)' : 'provided by environment'}</span>
             </div>
             <div className="kv"><span>jobs active / pending</span><span>{info.jobs.active} / {info.jobs.pending} of {info.jobs.max}</span></div>
           </Card>

@@ -1,7 +1,7 @@
 import type {
   AgentRun, AiAutoProbeResponse, AiProviderProbeResult, AiProviderTestResult, AiProvidersResponse,
   BuildResult, CommandResult, Conversation,
-  ExportResult, FileEntry, Message, PreviewResult, Project, ProviderSelection, SecurityScan, SystemStatus, User,
+  ExportResult, FileEntry, GithubStatus, Message, PreviewResult, Project, ProviderSelection, SecurityScan, SystemStatus, User,
 } from './types.ts';
 
 /** Re-exported so callers have a single import site for the contract types. */
@@ -71,6 +71,7 @@ export const api = {
   systemStatus: () => request<SystemStatus>('/api/system/status'),
   systemInfo: () => request<SystemStatus & { config: Record<string, unknown> }>('/api/system/info'),
   emulator: () => request<PreviewResult & { status: string; note: string }>('/api/system/emulator'),
+  github: () => request<GithubStatus>('/api/system/github'),
 
   // projects
   listProjects: () => request<{ projects: Project[] }>('/api/projects'),
@@ -138,6 +139,15 @@ export const api = {
 
 export function downloadUrl(projectId: string, kind: 'apk' | 'zip' | 'logs'): string {
   return `${API_URL}/api/projects/${projectId}/download/${kind}`;
+}
+
+/**
+ * GitHub artifact downloads are proxied by the backend, which attaches the
+ * token server-side. The browser only ever sees this credential-free URL; the
+ * session cookie authenticates the request.
+ */
+export function githubArtifactUrl(artifactId: number): string {
+  return `${API_URL}/api/system/github/artifacts/${artifactId}`;
 }
 
 export function websocketUrl(projectId: string): string {

@@ -153,6 +153,14 @@ export const config = {
   aiProviderCooldownMs: int('AI_PROVIDER_COOLDOWN_MS', 30 * 1000),
   aiProviderCooldownMaxMs: int('AI_PROVIDER_COOLDOWN_MAX_MS', 15 * 60 * 1000),
 
+  // GitHub Actions integration. Optional: without a token the status endpoint
+  // reports NOT_CONFIGURED and never claims a workflow ran. The token is read
+  // server-side only and is never sent to the browser or written to a log.
+  githubToken: env('GITHUB_TOKEN'),
+  githubRepo: env('GITHUB_REPO'),
+  githubApiBaseUrl: env('GITHUB_API_BASE_URL', 'https://api.github.com'),
+  githubTimeoutMs: int('GITHUB_TIMEOUT_MS', 30000),
+
   workspaceRoot: path.resolve(env('WORKSPACE_PATH', path.join(process.cwd(), 'workspace-data', 'projects'))),
   storageRoot: path.resolve(env('STORAGE_PATH', path.join(process.cwd(), 'workspace-data', 'storage'))),
 

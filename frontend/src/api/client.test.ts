@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, api, downloadUrl, websocketUrl } from './client.ts';
+import { ApiError, api, downloadUrl, githubArtifactUrl, websocketUrl } from './client.ts';
 
 /**
  * These tests drive the real request() path with a stubbed fetch. Only the
@@ -75,5 +75,20 @@ describe('api client', () => {
 
   it('derives the websocket scheme from the page origin', () => {
     expect(websocketUrl('p1')).toMatch(/^wss?:\/\/[^/]+\/ws\?projectId=p1$/);
+  });
+
+  it('reads the GitHub status from the system endpoint', async () => {
+    const calls = stubFetch(() => jsonResponse({ state: 'NOT_CONFIGURED', connected: false, repo: null, tokenConfigured: false, detail: null, latestRun: null, latestArtifacts: [] }));
+    const status = await api.github();
+    expect(calls[0].url).toContain('/api/system/github');
+    expect(status.state).toBe('NOT_CONFIGURED');
+    expect(status.connected).toBe(false);
+  });
+
+  it('builds a credential-free artifact proxy URL', () => {
+    const url = githubArtifactUrl(12345);
+    expect(url).toBe('/api/system/github/artifacts/12345');
+    // The browser never receives a token: the backend attaches it server-side.
+    expect(url).not.toMatch(/ghp_|github_pat_|token=|key=/i);
   });
 });

@@ -52,9 +52,18 @@ Steps, in order:
    --verbose`. Reports are written to `apk-inspection/`.
 7. Unzip each APK and grep its contents for key-shaped strings, then grep the
    project sources. Any hit is `SECURITY FAILED` and the job fails.
-8. Upload the APKs and the inspection reports as artifacts with
-   `if-no-files-found: error`, so a missing artifact fails rather than uploading
-   an empty set.
+8. Package the APKs into `apk-artifact/` as `<sample>-app-debug.apk` together
+   with `SHA256SUMS.txt` and `BUILD_INFO.txt` (commit, branch, build time, run
+   number, Java, Gradle wrapper, Android Gradle Plugin, unit-test result, and
+   each APK's name, size and SHA-256), grep that directory once more for
+   key-shaped strings, then upload it as the `my-ai-studio-debug-apk` artifact
+   with `if-no-files-found: error`. The inspection reports go up separately as
+   `apk-inspection`.
+
+`BUILD_INFO.txt` records `unit_tests: SUCCESS` only because the test step runs
+under `set -e` and writes that output value as its final command: a failing
+suite aborts the step and the job, so the file cannot claim a passing test run
+that did not happen.
 
 Each sample is a standalone Gradle project with its own wrapper; there is no
 `android-samples/gradlew`, which is why the steps loop over samples instead of
@@ -117,3 +126,36 @@ ls -l app/build/outputs/apk/debug/app-debug.apk
 If that works locally but fails in CI, the difference is almost always the SDK
 component list or the JDK version - check the `Show toolchain versions` and
 `sdkmanager --list_installed` output in the failing job.
+
+## Reading CI results from the app
+
+The backend exposes the state of the latest workflow run so the Build Center can
+show real CI status instead of a guess. Two routes, both behind the normal
+session cookie:
+
+| Route | Behaviour |
+| --- | --- |
+| `GET /api/system/github` | Probes the configured repository and reports the latest run with its artifacts |
+| `GET /api/system/github/artifacts/:artifactId` | Streams one artifact archive through the server |
+
+Configure with `GITHUB_REPO` (required) and `GITHUB_TOKEN` (optional, but needed
+for private repositories and higher rate limits). With no repository the route
+answers `NOT_CONFIGURED` and makes no outbound call.
+
+The states are literal, not decorative:
+
+| `state` | Meaning |
+| --- | --- |
+| `NOT_CONFIGURED` | `GITHUB_REPO` is unset; no request was made |
+| `AVAILABLE` | GitHub answered; `latestRun` reflects a real run, or is `null` if the repository has none |
+| `ERROR` | GitHub answered with an error (bad token, unknown repo, rate limit); `detail` carries the reason |
+
+`AVAILABLE` means the call succeeded, not that a run is green: read
+`latestRun.conclusion` for the outcome. The route never invents a run.
+
+The browser never receives `GITHUB_TOKEN`. The artifact route validates that the
+requested id belongs to the latest run of the configured repository before
+downloading, then attaches the token server-side; an id from another repository
+is rejected with `404`, and a token-less server cannot download action artifacts
+at all (GitHub requires authentication), which the route reports as `503` rather
+than fetching anonymously.

@@ -1201,3 +1201,64 @@ workflows' own CI runs remain as previously recorded: NOT TESTED or NOT
 AVAILABLE. `java`, `gradle` and the Android SDK are NOT_AVAILABLE in this
 container; the APK is built on a GitHub runner, not locally. Nothing here should
 be read as claiming a local Android build.
+
+---
+
+## Addendum — 2026-09-24, production stack on the public work host
+
+This session moved the system from a locally-tested build to a running
+production-shaped stack reachable from a URL, and the browser/mobile surface was
+exercised against it. The earlier "ANDROID SDK PASS (host)" line describes the
+OpenHands host this container runs on, not the deployment host; the production
+stack has no Android SDK, which is why the APK is built on GitHub runners.
+
+### What was observed
+
+| Area | Status | Evidence |
+| --- | --- | --- |
+| PUBLIC FRONTEND | PASS | `GET https://work-1-…all-hands.dev/` → 200, `<title>My AI Studio</title>`, bundle served through Caddy; no secret in the served bundle |
+| PUBLIC API | PASS | `/api/health` → 200; `/api/projects` unauthenticated → 401 |
+| DATABASE | PASS | `/api/system/status` reports `postgres: AVAILABLE, PostgreSQL 16.15`; `POST /api/auth/register` → 201 with a persisted user row |
+| SANDBOX EXECUTION | PASS | `executionBackend: docker`; the sandbox runs as unprivileged `sandbox`, a written `smoke.mjs` ran under `node` → "REAL-EXEC-OK" |
+| SANDBOX ISOLATION | PASS | inside the sandbox `/.env` is absent, `/data` is absent, `env` contains 0 of OPENROUTER/JWT_SECRET/DATABASE_URL/GEMINI/GROQ, and `http://127.0.0.1:8080/api/health` is unreachable |
+| PROJECT AUTHORIZATION | PASS | a second user's token gets 404 (not 403) on another user's project, files, terminal and delete |
+| PATH TRAVERSAL | PASS | `../../../etc/passwd`, `/etc/passwd`, `src/../../../../etc/passwd`, and create `../evil.txt` all return 400 |
+| COMMAND POLICY | PASS | `rm -rf /workspace` inside the sandbox is refused with `BLOCKED BY POLICY` and exit 126; the project files remain intact afterwards |
+| AGENT LOOP | PASS | real run: provider Gemini, model gemini-3.5-flash-lite, `status: succeeded`, `phase: completed`, 9422 in / 381 out tokens, 1 of 5 fix attempts used; it ran `npm install`, `npm run build`, `npm test`, and the file it created (`AGENT_PROOF.txt` = "built-by-agent") was read back from the API |
+| PROVIDER FAILOVER | PASS | the same run recorded `failover_reason: openrouter unavailable; groq answered` — the request really moved between providers |
+| MULTI-PROVIDER | PASS | `/api/ai/providers` reports openrouter, gemini, groq, cerebras, mistral, cloudflare, nvidia as CONFIGURED; huggingface, chutes, sambanova, ollama, vllm as NOT_CONFIGURED |
+| WEBSOCKET | PASS | `scripts/ws-smoke.mjs`: no-token and bad-token rejected with 401, valid token opens and receives a `connected` frame |
+| BACKEND SUITE | PASS | 196/196 tests, `tsc` build exit 0 |
+| FRONTEND SUITE | PASS | 31/31 tests, `eslint` clean, production build exit 0 |
+
+### The one real defect this session found
+
+`scripts/deploy-production.sh` reported `PRODUCTION DEPLOYMENT: PASS` while every
+account operation was returning HTTP 500. `/api/health` never touches the
+database and the unauthenticated `/api/projects` is rejected before any query, so
+all three surface checks passed against a dead database. Cause: PostgreSQL applies
+`POSTGRES_PASSWORD` only at first initialisation, so a password changed in `.env`
+after the volume existed left a stale verifier in `pg_authid` while `pg_isready`
+kept the container healthy.
+
+Fixed: the script now reads the `postgres` probe from `/api/system/status`, which
+issues a real `SELECT version()`, and fails with a remediation hint otherwise. The
+running stack was repaired in place with `ALTER ROLE … WITH PASSWORD …` — no data
+loss, no `trust` fallback — and re-verified: probe `AVAILABLE`, register 201. The
+failure mode and the fix are documented in `TROUBLESHOOTING.md`.
+
+### What remains open
+
+| Area | Status | Why |
+| --- | --- | --- |
+| GITHUB PUSH (this source) | NOT POSSIBLE | the credential is a fine-grained PAT scoped to `rasonjonathan6-coder/app` and `…/deblocage-tango`; it cannot create a repository (`403 Resource not accessible by integration`) and no My AI Studio source repository exists under the account. Commits are in this workspace on `fix/multi-provider-routing-and-preview-contract` (HEAD `10fac93`). Push needs a repo the token can write, or a broader token |
+| ORACLE DEPLOYMENT | NOT TESTED | no Oracle Cloud access in this environment |
+| CLOUDFLARE PAGES | NOT TESTED | no Cloudflare account access; the frontend builds and takes `VITE_API_URL` |
+| ANDROID EMULATOR | NOT AVAILABLE | no `/dev/kvm`, `adb devices` empty on the deployment host |
+| PUBLIC TLS TERMINATION | EXTERNAL | the work host terminates TLS in front of the stack; `MY_AI_STUDIO_DOMAIN`/`ACME_EMAIL` are wired for a real certificate when the stack is run directly under Caddy |
+
+`rasonjonathan6-coder/app` is the *publish target* that the studio's own
+GitHub-sync feature wrote generated test projects to — it contains
+`server.js`/`package.json` for the floating-ai-translator sample, not this
+codebase. It is not the source repository and was left untouched.
+

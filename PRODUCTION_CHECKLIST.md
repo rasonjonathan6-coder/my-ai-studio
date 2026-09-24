@@ -30,6 +30,7 @@ on that machine's toolchain.
 | Item | State | Evidence |
 | --- | --- | --- |
 | Database migrations | PASS | 13 tables created; asserted by querying `information_schema` |
+| Database connectivity assertion | PASS | `scripts/deploy-production.sh` reads the `postgres` probe from `/api/system/status` (a real `SELECT version()`) and fails instead of reporting PASS when it is not `AVAILABLE`. Added after the script passed a stack whose database was unreachable — see the 2026-09-24 addendum in `FINAL_REPORT.md` |
 | Authentication (register/login/logout/me) | PASS | exercised by `scripts/smoke.sh` |
 | Project authorization | PASS | a second account gets 404 for another user's project, on both project metadata and every download route; the 404 is deliberate so ids cannot be probed (an audit row is still written) |
 | Unauthenticated access denied | PASS | unauthenticated `GET /api/projects/:id/download/apk` returns 401; smoke asserts it |

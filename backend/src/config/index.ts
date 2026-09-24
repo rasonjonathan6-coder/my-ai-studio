@@ -48,6 +48,25 @@ const jwtSecret = configuredJwtSecret || randomBytes(48).toString('hex');
 const configuredCredentialKey = env('MY_AI_STUDIO_CREDENTIAL_KEY');
 const credentialKey = configuredCredentialKey || jwtSecret;
 
+// The host execution backend runs agent commands in this process's own
+// environment, so a command can read the server's environment file and every
+// secret in it. Output redaction masks secrets in *plain* output, but it is a
+// text filter, not a boundary: `base64 .env`, `od -c .env` or `rev .env` return
+// the raw value and defeat it. Any authenticated user of a public deployment
+// therefore reaches every provider key. Production must run the Docker sandbox;
+// opting out requires ALLOW_HOST_EXECUTION_IN_PRODUCTION=true, which is a
+// deliberate single-tenant choice and is reported by /api/system/status.
+const sandboxEnabled = bool('SANDBOX_ENABLED', false);
+const allowHostExecutionInProduction = bool('ALLOW_HOST_EXECUTION_IN_PRODUCTION', false);
+if (isProduction && !sandboxEnabled && !allowHostExecutionInProduction) {
+  throw new Error(
+    'Refusing to start: SANDBOX_ENABLED is false in production, so agent commands would run ' +
+      'in the server process and could read its secrets. Build the sandbox image and set ' +
+      'SANDBOX_ENABLED=true, or set ALLOW_HOST_EXECUTION_IN_PRODUCTION=true if this host is ' +
+      'trusted and single-tenant.',
+  );
+}
+
 const sameSiteRaw = env('SESSION_COOKIE_SAMESITE', 'lax').toLowerCase();
 if (!['lax', 'strict', 'none'].includes(sameSiteRaw)) {
   throw new Error(`SESSION_COOKIE_SAMESITE must be lax, strict or none (got "${sameSiteRaw}")`);
@@ -248,7 +267,12 @@ export const config = {
   buildRateLimitMax: int('BUILD_RATE_LIMIT_MAX', 10),
 
   sandbox: {
-    enabled: bool('SANDBOX_ENABLED', false),
+    enabled: sandboxEnabled,
+    // True in production whenever the operator has explicitly accepted host
+    // execution. Deliberately independent of SANDBOX_ENABLED: the flag names an
+    // accepted risk, not a request for the sandbox, so it must also cover the
+    // case where the sandbox was requested but is not usable.
+    hostExecutionAllowedInProduction: isProduction && allowHostExecutionInProduction,
     image: env('SANDBOX_IMAGE', 'my-ai-studio-sandbox:latest'),
     memoryLimit: env('SANDBOX_MEMORY', '2g'),
     cpuLimit: env('SANDBOX_CPUS', '2'),
@@ -262,6 +286,17 @@ export const config = {
       .split(',')
       .map((m) => m.trim())
       .filter(Boolean),
+    // The sandbox is launched as a *sibling* container, so its bind mounts are
+    // resolved by the Docker daemon against the host filesystem, not against
+    // this process's filesystem. When the backend itself runs in a container,
+    // WORKSPACE_PATH is an in-container path (e.g. /data/workspaces) that does
+    // not exist on the host, and Docker silently creates an empty directory
+    // instead of mounting the project. The command then runs against an empty
+    // workspace and every build fails with a confusing "no such file".
+    // Set this to the host path of the same directory (the host side of the
+    // volume backing WORKSPACE_PATH) to make the mount resolve correctly.
+    // Empty means the two are identical, which is the bare-metal case.
+    workspaceHostPath: env('SANDBOX_WORKSPACE_HOST_PATH', ''),
   },
 
   androidHome: env('ANDROID_HOME', env('ANDROID_SDK_ROOT', '')),

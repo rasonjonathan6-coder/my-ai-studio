@@ -27,6 +27,11 @@ function resolveConfig(env: Record<string, string>): { sameSite: string; secure:
   return JSON.parse(runConfig(env).trim().split('\n').pop() as string);
 }
 
+// A production run must declare its execution backend, otherwise the
+// host-execution guard refuses to start. These cases are about cookie policy,
+// so they state the sandbox explicitly and keep the two concerns separate.
+const PROD = { NODE_ENV: 'production', SANDBOX_ENABLED: 'true' };
+
 test('defaults to lax and non-secure outside production', () => {
   assert.deepEqual(resolveConfig({ NODE_ENV: 'development', SESSION_COOKIE_SAMESITE: '' }), {
     sameSite: 'lax',
@@ -43,7 +48,7 @@ test('none forces Secure, because browsers reject None without it', () => {
 
 test('production is always Secure even with lax', () => {
   assert.deepEqual(
-    resolveConfig({ NODE_ENV: 'production', SESSION_COOKIE_SAMESITE: 'lax', JWT_SECRET: 'x'.repeat(40) }),
+    resolveConfig({ ...PROD, SESSION_COOKIE_SAMESITE: 'lax', JWT_SECRET: 'x'.repeat(40) }),
     { sameSite: 'lax', secure: true },
   );
 });

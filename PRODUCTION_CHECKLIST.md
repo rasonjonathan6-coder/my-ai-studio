@@ -17,11 +17,11 @@ on that machine's toolchain.
 | --- | --- | --- |
 | Backend typecheck | PASS | `npm run typecheck` clean |
 | Backend lint | PASS | `npm run lint` clean |
-| Backend tests | PASS | `npm test` - 58 tests, 58 pass; the job-queue suite is mutation-checked (removing the timeout race turns it red) |
+| Backend tests | PASS | `npm test` - 196 tests, 196 pass; the job-queue suite is mutation-checked (removing the timeout race turns it red) |
 | Backend build (`tsc`) | PASS | emits `backend/dist/server.js` |
 | Frontend typecheck | PASS | `tsc --noEmit` clean |
 | Frontend lint | PASS | `eslint` clean |
-| Frontend tests | PASS | `vitest run` - 13 tests, 13 pass |
+| Frontend tests | PASS | `vitest run` - 31 tests, 31 pass |
 | Frontend production build | PASS | `vite build` emits `frontend/dist` |
 | Bundle contains no secrets | PASS | grep of `dist/` for key patterns is empty |
 
@@ -46,7 +46,13 @@ on that machine's toolchain.
 | Provider key isolation | PASS | provider keys are read server-side only; the test endpoint masks them and no key reaches the frontend bundle or an attempt record |
 | Android preview endpoint | NOT AVAILABLE | real `adb devices` probe returns no attached device; the endpoint answers `ANDROID PREVIEW: NOT AVAILABLE` and the UI shows no mocked frame |
 | Agent loop (real tools) | PASS | run reached `succeeded`; source file repaired on disk and APK hash matched the inspection record |
-| Docker sandbox | PASS | commands ran in the sandbox image as uid 1000 with no socket |
+| Docker sandbox | PASS | commands ran in the sandbox image as uid 1000 with no socket; a live `node --version` returned the image's v18, not the host's v22 |
+| Production stack (`docker-compose.prod.yml`) | PASS | deployed and verified end to end by `scripts/deploy-production.sh`: frontend 200, `/api/health` 200, unauthenticated 401, `executionBackend: docker`, served bundle free of secrets |
+| Public HTTPS reachability | PASS | served through the platform's HTTPS edge; register 201, project create 201, WebSocket `connected` frame received, unauthenticated and cross-user reads 401 |
+| Sandbox secret isolation | PASS | from inside the sandbox, `cat /.env` says no such file, `ls /data` says no such file, and `env \| grep -iE 'OPENROUTER\|JWT\|DATABASE'` is empty; `/proc/1/environ` is refused (HTTP 500) |
+| Sandbox workspace mount | PASS | the project's real files are visible at `/workspace` in the sandbox and `npm install && npm test` ran there with exit 0 |
+| Production sandbox fail-closed | PASS | `resolveBackend` refuses instead of falling back to the host when the daemon is unreachable or the image is missing; 5 tests cover it, and the startup log reports `executionBackend: unavailable` in that state |
+| Production guard regression | PASS | `backend/tests/productionGuard.test.ts` - 8 tests, 8 pass |
 
 ## Android
 
@@ -73,7 +79,7 @@ on that machine's toolchain.
 | GitHub workspace publish | PASS (live) | `POST /api/projects/:id/github/sync` returned HTTP 200 pushing 15 files to `rasonjonathan6-coder/app` (commit `8a9eb825b323…`) and installed the managed workflow on the default branch; the Git Data sequence, `base_tree` preservation and install are also asserted in `CASE 3`/`CASE 3c` |
 | GitHub workflow dispatch | PASS (live) | `POST /api/projects/:id/github/build` returned HTTP 202, `status: queued`; run `36030411740` reached `success`; the APK (3 189 843 bytes) and the 81 KB run log were fetched back through My AI Studio's own routes |
 | GitHub write capability probe | PASS | `canWrite` distinguishes a read-only credential from a writable one; seen `true` under the writable credential used for the publish above. The credential now in this environment is read-only and reports `canWrite: false`, so publish and dispatch are refused with an actionable 403 (see `FINAL_REPORT.md`, 2026-09-24 addendum) |
-| Oracle Cloud deployment | NOT TESTED | no Oracle access; see `ORACLE_SETUP.md` |
+| Oracle Cloud deployment | NOT TESTED | no Oracle access; see `ORACLE_SETUP.md`. The production stack itself is deployed and verified (rows above) on a different host, so the remaining Oracle-specific step is provisioning the VM |
 | Cloudflare Pages deployment | NOT TESTED | no Cloudflare access; see `CLOUDFLARE_SETUP.md` |
 | Supabase connection | NOT TESTED | no Supabase project; uses local PostgreSQL |
 | Backup job | NOT CONFIGURED | procedure documented, no scheduler installed |

@@ -18,6 +18,7 @@ import { closePool, checkDatabase } from './db/pool.ts';
 import { runMigrations } from './db/migrate.ts';
 import { loadStoredCredential } from './services/githubCredential.ts';
 import { promoteAdminByEmail, hasAdmin } from './services/auth.ts';
+import { resolveBackend } from './services/commandRunner.ts';
 import { jobQueue } from './services/jobQueue.ts';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -131,12 +132,22 @@ export async function startServer(): Promise<{ close: () => Promise<void> }> {
   await new Promise<void>((resolve) => server.listen(config.port, config.host, resolve));
 
   const db = await checkDatabase();
+  // Report the backend that commands will actually use, not the configured
+  // intent. They diverge when SANDBOX_ENABLED is set but the sandbox is not
+  // usable, and logging the intent there reads as a false assurance.
+  let executionBackend: 'docker' | 'host' | 'unavailable';
+  try {
+    executionBackend = await resolveBackend('auto');
+  } catch (err) {
+    executionBackend = 'unavailable';
+    logger.error('command execution backend unusable', { error: (err as Error).message });
+  }
   logger.info('my-ai-studio backend listening', {
     url: `http://${config.host}:${config.port}`,
     env: config.env,
     database: db.configured ? (db.connected ? 'connected' : 'unreachable') : 'not_configured',
     openrouter: config.openRouterApiKey ? 'configured' : 'not_configured',
-    sandbox: config.sandbox.enabled ? 'docker' : 'host',
+    executionBackend,
   });
 
   let shuttingDown = false;

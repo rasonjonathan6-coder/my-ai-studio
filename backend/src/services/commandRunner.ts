@@ -13,6 +13,7 @@
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { config } from '../config/index.ts';
 import { logger, redact } from '../lib/logger.ts';
 
@@ -197,6 +198,25 @@ function sandboxDirWritable(dir: string): Promise<boolean> {
   return probe;
 }
 
+/**
+ * Maps an in-container path to the path the Docker daemon will resolve it
+ * against. The daemon runs on the host, so a sibling container's bind mount
+ * source must be a host path. When the backend is containerised, WORKSPACE_PATH
+ * is the in-container path and the host path of the same directory is supplied
+ * separately via SANDBOX_WORKSPACE_HOST_PATH.
+ */
+export function toHostPath(containerPath: string): string {
+  const containerRoot = config.workspaceRoot;
+  const hostRoot = config.sandbox.workspaceHostPath;
+  if (!hostRoot) return containerPath;
+  if (containerPath !== containerRoot && !containerPath.startsWith(containerRoot + path.sep)) {
+    // Outside the workspace tree there is no mapping to apply, so pass it through
+    // unchanged rather than inventing one.
+    return containerPath;
+  }
+  return path.posix.join(hostRoot, path.posix.relative(containerRoot, containerPath));
+}
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -223,10 +243,30 @@ export async function dockerImageExists(image: string): Promise<boolean> {
 export async function resolveBackend(preferred: ExecutionBackend | 'auto'): Promise<ExecutionBackend> {
   if (preferred === 'host') return 'host';
   if (!config.sandbox.enabled) return 'host';
-  if (!(await dockerAvailable())) return 'host';
+
+  // Falling back to the host backend is safe in development and unsafe in
+  // production: the host backend runs commands in this process and can read its
+  // environment file, which holds every provider key. The boot guard only checks
+  // that SANDBOX_ENABLED is set, so without this a production host with a
+  // missing image or an unreachable daemon would pass startup and then silently
+  // execute agent commands on the host. Fail closed instead: an operator who
+  // wants host execution in production has to say so explicitly.
+  const failClosed = config.env === 'production' && !config.sandbox.hostExecutionAllowedInProduction;
+  const refuse = (reason: string): never => {
+    throw new Error(
+      `Refusing to run commands: ${reason}. Production requires the Docker sandbox, because the ` +
+        'host backend can read this process secrets. Fix the sandbox (build the image, start the ' +
+        'daemon), or set ALLOW_HOST_EXECUTION_IN_PRODUCTION=true if this host is trusted and single-tenant.',
+    );
+  };
+
+  if (!(await dockerAvailable())) {
+    if (failClosed) refuse('the Docker daemon is unreachable');
+    return 'host';
+  }
   if (!(await dockerImageExists(config.sandbox.image))) {
-    if (preferred === 'docker') {
-      throw new Error(`SANDBOX_IMAGE ${config.sandbox.image} not found; build it with: docker build -f Dockerfile.sandbox -t ${config.sandbox.image} .`);
+    if (preferred === 'docker' || failClosed) {
+      refuse(`SANDBOX_IMAGE ${config.sandbox.image} not found; build it with: docker build -f Dockerfile.sandbox -t ${config.sandbox.image} .`);
     }
     return 'host';
   }
@@ -283,7 +323,7 @@ export async function runCommand(options: RunOptions): Promise<RunResult> {
         '--security-opt', 'no-new-privileges',
         '--workdir', '/workspace',
         '--tmpfs', '/tmp:rw,exec,size=512m',
-        '-v', `${options.cwd}:/workspace:rw`,
+        '-v', `${toHostPath(options.cwd)}:/workspace:rw`,
         ...config.sandbox.extraMounts.flatMap((m) => ['-v', m]),
         ...Object.entries(options.env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
         config.sandbox.image,

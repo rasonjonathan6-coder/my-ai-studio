@@ -1,0 +1,135 @@
+# Production stack for My AI Studio.
+#
+#   cp .env.production.example .env   # fill it in, never commit it
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Differences from the development compose file:
+#   * a `web` service serves the frontend and terminates TLS, so there is one
+#     public origin and no cross-site cookie
+#   * the backend is not published to the host: only `web` can reach it
+#   * the sandbox image is built and the Docker socket is mounted read-only,
+#     because production refuses to run agent commands on the host (see the
+#     guard in backend/src/config/index.ts)
+#
+# The Docker socket is a privilege-escalation path. It is required here only
+# because the backend launches sibling containers for commands; the backend
+# image has no daemon and runs as an unprivileged user. On a multi-tenant host
+# put the sandbox on its own machine and set SANDBOX_REMOTE_HOST instead.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-myaistudio}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-myaistudio}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-myaistudio} -d ${POSTGRES_DB:-myaistudio}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Reachable only by the backend on the internal network, never from outside.
+    expose:
+      - '5432'
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - path: ./.env
+        required: false
+    environment:
+      NODE_ENV: production
+      PORT: '8080'
+      HOST: 0.0.0.0
+      DATABASE_URL: postgres://${POSTGRES_USER:-myaistudio}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-myaistudio}
+      DATABASE_SSL: 'false'
+      WORKSPACE_PATH: /data/workspaces
+      STORAGE_PATH: /data/storage
+      SANDBOX_ENABLED: 'true'
+      SANDBOX_IMAGE: my-ai-studio-sandbox:latest
+      # The host path of WORKSPACE_PATH, used when mounting a project into the
+      # sandbox. Must match the left-hand side of the workspaces bind mount below.
+      SANDBOX_WORKSPACE_HOST_PATH: ${DATA_ROOT:?set DATA_ROOT to a host directory for project data}/workspaces
+      # Same-origin deployment: the browser talks to `web`, which proxies the
+      # API. Keeping this to the single public origin is what lets the session
+      # cookie stay SameSite=Lax.
+      CORS_ORIGINS: https://${MY_AI_STUDIO_DOMAIN:?set MY_AI_STUDIO_DOMAIN in .env}
+      SESSION_COOKIE_SAMESITE: lax
+      # Where the backend launches sibling containers. Inside the backend
+      # container the host daemon is reachable through the mounted socket, so
+      # the API path does not apply; kept for clarity of intent.
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      # Bind mounts with known host paths, not named volumes. The backend passes
+      # a project's directory to the Docker daemon to mount into the sandbox, and
+      # the daemon resolves that path on the host. Named volumes live under an
+      # opaque /var/lib/docker/volumes path, so the backend could not name the
+      # host side. These bind mounts make the host path exactly
+      # ${DATA_ROOT}/workspaces, which SANDBOX_WORKSPACE_HOST_PATH below repeats.
+      - '${DATA_ROOT:?set DATA_ROOT to a host directory for project data}/workspaces:/data/workspaces'
+      - '${DATA_ROOT}/storage:/data/storage'
+      # Required for SANDBOX_ENABLED=true. Read-only: the backend only creates
+      # sibling containers, it never needs to write to the daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # The socket is owned by root:<docker gid> with mode 0660, while the
+    # container runs as the unprivileged `node` user (gid 1000). Without this the
+    # process cannot open the socket and every command fails with "permission
+    # denied", which the startup probe now reports as executionBackend
+    # "unavailable" rather than silently degrading to the host.
+    #   export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+    group_add:
+      - '${DOCKER_GID:?set DOCKER_GID to the host docker group id: stat -c %g /var/run/docker.sock}'
+    # Not published: only `web` reaches it, over the compose network.
+    expose:
+      - '8080'
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/frontend.Dockerfile
+      args:
+        # deploy/Caddyfile terminates TLS here (needs a resolvable domain).
+        # deploy/Caddyfile.public expects TLS to be terminated upstream and
+        # serves plain HTTP, for platforms that front the container themselves.
+        CADDYFILE: ${CADDYFILE:-deploy/Caddyfile}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      MY_AI_STUDIO_DOMAIN: ${MY_AI_STUDIO_DOMAIN:?set MY_AI_STUDIO_DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.invalid}
+    ports:
+      # Overridable so a platform that assigns its own port can bind it without
+      # editing this file.
+      - '${WEB_HTTP_PORT:-80}:80'
+      - '${WEB_HTTPS_PORT:-443}:443'
+    volumes:
+      # Certificates and ACME account state must survive a restart, otherwise
+      # every restart re-requests a certificate and hits the Let's Encrypt rate
+      # limit.
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # The image the backend launches per command. Never started as a service.
+  sandbox:
+    profiles: ['sandbox']
+    build:
+      context: ./sandbox
+      args:
+        INSTALL_ANDROID_TOOLCHAIN: ${INSTALL_ANDROID_TOOLCHAIN:-1}
+    image: my-ai-studio-sandbox:latest
+    command: ['true']
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

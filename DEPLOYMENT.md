@@ -21,7 +21,81 @@ wildcard origin is not appropriate in production.
 The backend reads its environment from the repository-root `.env` (the npm
 scripts pass `--env-file-if-exists=../.env`).
 
-## Option A - Docker Compose
+## Option A - Docker Compose (production stack)
+
+`docker-compose.prod.yml` runs the whole system - database, backend, TLS-
+terminating web server and the command sandbox - from one file. Prefer this over
+the development `docker-compose.yml` for anything internet-facing.
+
+```bash
+git clone https://github.com/<owner>/<repo>.git my-ai-studio
+cd my-ai-studio
+
+cp .env.production.example .env
+# Fill in DATABASE_URL, JWT_SECRET and MY_AI_STUDIO_CREDENTIAL_KEY at minimum.
+# Generate each with: openssl rand -hex 32
+# MY_AI_STUDIO_CREDENTIAL_KEY encrypts the stored GitHub credential. Keep it
+# separate from JWT_SECRET so rotating sessions does not lock the credential out.
+
+./scripts/deploy-production.sh
+```
+
+The script builds the images, starts the stack, and then verifies it before
+reporting: it checks that the frontend, the API and the 401 on an unauthenticated
+request all answer, that the backend really resolved the Docker sandbox as its
+execution backend, and that no secret is present in the bytes served to the
+browser. It prints `PRODUCTION DEPLOYMENT: PASS` only if all of that held.
+
+Three settings in `.env` drive the deployment and have no safe default:
+
+| Variable | Meaning |
+| --- | --- |
+| `MY_AI_STUDIO_DOMAIN` | The hostname users open. Must resolve to this host for Let's Encrypt. |
+| `DATA_ROOT` | Host directory for project workspaces and artifacts. Must be writable by uid 1000. |
+| `DOCKER_GID` | Group id owning `/var/run/docker.sock`. The script derives it (`stat -c %g`); compose needs it to grant the backend access. |
+
+### Sandbox configuration
+
+The sandbox is a sibling container, which drives two settings that are easy to
+get wrong:
+
+1. The backend must be able to open the Docker socket. The socket is owned by
+   `root:<docker gid>` with mode `0660` while the backend runs as an
+   unprivileged uid 1000, so `docker-compose.prod.yml` passes
+   `group_add: '${DOCKER_GID}'`. Without it every command fails with
+   "permission denied" and the startup log reports `executionBackend` as
+   `unavailable`, not `docker`.
+2. The daemon resolves bind-mount sources on the *host*, not inside the backend
+   container. `WORKSPACE_PATH` (`/data/workspaces`) does not exist on the host, so
+   Docker would silently mount an empty directory and every build would fail with
+   a missing `package.json`. `SANDBOX_WORKSPACE_HOST_PATH` supplies the host path
+   of the same directory, and the workspaces mount is a bind mount rather than a
+   named volume for this reason.
+
+Mounting the Docker socket grants effective root on the host, so only do this on
+a machine dedicated to this service.
+
+In production the backend refuses to start unless `SANDBOX_ENABLED=true`, and it
+refuses to *fall back* to host execution if the sandbox turns out to be
+unusable at run time (image missing, daemon down). Both exist because the host
+backend runs commands in the server process, which can read the environment file
+and every provider key in it. `ALLOW_HOST_EXECUTION_IN_PRODUCTION=true` overrides
+both, and is only appropriate for a trusted single-tenant host.
+
+### TLS terminated by a platform
+
+If something in front of the container already serves HTTPS and forwards plain
+HTTP to it - a platform proxy or a managed load balancer - set:
+
+```bash
+CADDYFILE=deploy/Caddyfile.public
+```
+
+This serves plain HTTP on the container port and does not redirect to HTTPS,
+which the default `deploy/Caddyfile` does. The browser still sees HTTPS from the
+edge, so the session cookie stays `Secure`.
+
+## Option A-bis - direct Compose (development topology)
 
 Prerequisites: a Linux VM, Docker Engine, and a clone of this repository.
 
@@ -42,6 +116,12 @@ sudo chown -R 1000:1000 /data/workspaces /data/storage
 docker compose up -d --build
 docker compose logs -f backend
 ```
+
+This topology uses a named volume for the workspace and leaves the Docker socket
+commented out, so it runs the host backend. That is fine for development: the
+host backend needs no socket and no `SANDBOX_WORKSPACE_HOST_PATH`. For anything
+reachable from the internet use the production stack above, which sandboxes
+commands.
 
 Verify:
 

@@ -1,0 +1,47 @@
+# Caddy configuration for deployments where TLS is terminated upstream.
+#
+# Use this when something in front of the container already speaks HTTPS and
+# forwards plain HTTP to it, for example a platform proxy or a managed load
+# balancer. The container then must NOT redirect to HTTPS itself, or the edge
+# and the container redirect to each other forever.
+#
+# The browser still sees HTTPS (the edge's certificate), so the session cookie
+# stays Secure and the API stays same-origin. For a direct-to-internet host with
+# its own certificate, use deploy/Caddyfile instead.
+
+:80 {
+	encode zstd gzip
+
+	header {
+		# No Strict-Transport-Security here: this hop is plain HTTP, and the
+		# header belongs on the HTTPS response the edge produces.
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# Prefix matchers, for the same reason as deploy/Caddyfile: the WebSocket is
+	# opened at `/ws?...` with no trailing slash.
+	handle /api* {
+		reverse_proxy backend:8080
+	}
+
+	handle /ws* {
+		reverse_proxy backend:8080 {
+			header_up Connection {http.request.header.Connection}
+			header_up Upgrade {http.request.header.Upgrade}
+		}
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

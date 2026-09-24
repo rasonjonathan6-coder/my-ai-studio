@@ -92,8 +92,9 @@ export interface SystemStatus {
     order: string[];
     cooldowns: Record<string, { cooling: boolean; until: string | null; reason: string | null }>;
   };
-  executionBackend: 'docker' | 'host';
+  executionBackend: 'docker' | 'host' | 'unavailable';
   sandboxEnabled: boolean;
+  hostExecutionRisk: string | null;
 }
 
 async function diskProbe(): Promise<SystemStatus['disk']> {
@@ -193,7 +194,18 @@ export async function getSystemStatus(): Promise<SystemStatus> {
   const androidHome = config.androidHome || process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || '';
   const javaHome = config.javaHome || process.env.JAVA_HOME || '';
 
-  const backend = await resolveBackend('auto');
+  // In production a broken sandbox makes resolveBackend throw rather than fall
+  // back to the host. Status must still answer, and must report the failure, so
+  // the Build Center can show that commands will not run instead of appearing
+  // healthy until the first job fails.
+  let backend: 'docker' | 'host' | 'unavailable';
+  let backendError: string | null = null;
+  try {
+    backend = await resolveBackend('auto');
+  } catch (err) {
+    backend = 'unavailable';
+    backendError = (err as Error).message;
+  }
 
   // When the docker backend is active, agent commands run inside the sandbox
   // image, not in this process. A toolchain probe must therefore look where the
@@ -306,6 +318,14 @@ export async function getSystemStatus(): Promise<SystemStatus> {
     },
     executionBackend: backend,
     sandboxEnabled: config.sandbox.enabled,
+    // Reported explicitly because the host backend can read this process's
+    // environment file, which holds every provider key: see the guard in config.
+    hostExecutionRisk:
+      backend === 'unavailable'
+        ? `BLOCKED: commands cannot run. ${backendError ?? ''}`.trim()
+        : backend === 'host'
+          ? 'HIGH: agent commands run in the server process and can read its secrets (use the Docker sandbox)'
+          : null,
   };
 }
 

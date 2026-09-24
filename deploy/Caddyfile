@@ -1,0 +1,61 @@
+# Caddy configuration for My AI Studio.
+#
+# One origin serves both the frontend and the API. That is deliberate: the API
+# is cookie-authenticated, and a single origin keeps the session cookie
+# SameSite=Lax with no CORS preflight and no cross-site third-party-cookie
+# problems on mobile Chrome.
+#
+# TLS is automatic. With a real domain, Caddy obtains and renews a certificate
+# from Let's Encrypt. Set MY_AI_STUDIO_DOMAIN in the environment (see
+# docker-compose.prod.yml); it defaults to the internal name used by a local
+# smoke test, where Caddy serves plain HTTP.
+
+{
+	# Replace with a real address to receive renewal notices.
+	email {$ACME_EMAIL:admin@example.invalid}
+}
+
+{$MY_AI_STUDIO_DOMAIN:localhost} {
+	encode zstd gzip
+
+	# Security headers. The API also sets these, but static assets are served
+	# here without passing through the backend.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# The API and WebSocket live on the backend. Everything else is static.
+	# The matcher is a prefix (`/api*`, `/ws*`), not `/ws/*`: the browser opens
+	# exactly `/ws?projectId=...` with no trailing slash, which `/ws/*` does not
+	# match. With the wrong matcher the upgrade silently fell through to the
+	# static handler and answered with index.html, so the socket never opened.
+	handle /api* {
+		reverse_proxy backend:8080
+	}
+
+	handle /ws* {
+		reverse_proxy backend:8080 {
+			# WebSocket and the long-lived event stream need the upgrade headers
+			# forwarded and a read timeout longer than any build.
+			header_up Connection {http.request.header.Connection}
+			header_up Upgrade {http.request.header.Upgrade}
+		}
+	}
+
+	# Static bundle. The SPA has no server-side routes, so unknown paths fall
+	# back to index.html rather than 404ing.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

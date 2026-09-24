@@ -30,7 +30,7 @@ inferred from intent. Every status is one of:
 | DOCKER | PASS | backend image built; container ran; full smoke suite executed inside it; sandbox runs as uid 1000, cannot reach `169.254.169.254`, and legitimate egress still works |
 | GITHUB ACTIONS (workflows) | PASS | five workflows written and YAML-valid; `android-build.yml` dispatched on a real GitHub-hosted runner and the job ran to `success` (JDK, Android SDK, `./gradlew test`, `assembleDebug`, APK locate, artifact upload) |
 | GITHUB PUBLISH / DISPATCH | PASS (live) | publish to `rasonjonathan6-coder/app` over the Git Data API, then dispatch of `android-build.yml`; run `36030411740` reached `success` and the workflow registered once the managed file was on the default branch |
-| GITHUB WRITE PROBE | PASS | `canWrite` in `/api/system/github` distinguishes a read-only credential from a writable one via a real dangling-blob write; verified live as `true` |
+| GITHUB WRITE PROBE | PASS | `canWrite` in `/api/system/github` distinguishes a read-only credential from a writable one via a real dangling-blob write; observed `true` under the writable credential and `false` under a read-only one (see the 2026-09-24 addendum) |
 | GITHUB APK ARTIFACT | PASS (live) | `app-debug-apk` artifact (3 189 843 bytes) downloaded through `GET /api/projects/:id/github/build/:buildId/apk` with `Content-Type: application/vnd.android.package-archive`; the bytes are a valid ZIP with `AndroidManifest.xml` and 422 entries |
 | GITHUB RUN LOGS | PASS (live) | `GET …/github/build/:buildId/logs` unpacks GitHub's 28 347-byte archive in-process and returns 81 397 characters of real job text containing `BUILD SUCCESSFUL`; redacted, no token present |
 | ANDROID SDK | PASS (host) | build-tools 34.0.0, platform-tools, adb on the host |
@@ -973,3 +973,70 @@ plain-HTTP local sessions must be treated as unreliable rather than as a defect.
 2. Android preview: attach a device/emulator host (or run an emulator with KVM)
    and point `adb` at it; the existing preview path will install, launch and
    capture logcat for real.
+
+---
+
+## ADDENDUM — 2026-09-24: GitHub credential state
+
+The GitHub integration was re-exercised end to end against the configured
+repository `rasonjonathan6-coder/app`. Everything below was observed in this
+session; nothing is carried over from the earlier session.
+
+### What was verified (PASS)
+
+| Check | Result |
+| --- | --- |
+| Repository reachable with the server credential | `GET /api/system/github` → `state: AVAILABLE`, `connected: true`, `credential: "token"` |
+| Read capabilities | `GET /repos/.../contents/` → 200; `GET /repos/.../actions/workflows` → 200 |
+| Managed workflow registered | `android-build.yml` listed `active` on the default branch |
+| Prior dispatch really ran | run `36030411740`, event `workflow_dispatch`, conclusion `success`, branch `my-ai-studio-build` |
+| Real artifact downloadable | `app-debug-apk`, 2 889 146 bytes, streamed through the server proxy: HTTP 200, `Content-Type: application/zip`, 3 entries (`app-debug.apk`, `BUILD_INFO.txt`, `SHA256SUMS.txt`) |
+| APK integrity | inner `app-debug.apk` SHA-256 `ebacdc121639e70e22d45ffe92786c53703f0c602b7947724b92ebc95b926170` equals the value in `SHA256SUMS.txt`; ZIP `testzip` clean, 422 entries |
+| APK identity | inspection reports `packageName com.myaistudio.hello`, versionName 1.0, versionCode 1, `MainActivity com.myaistudio.hello.MainActivity`; tools `aapt2`, `zipreader`, `axml`, `apksigner` |
+| Token secrecy | the token value and the `ghu_`/`ghp_`/`github_pat_`/`ghs_` shapes are absent from `/api/system/github` |
+
+### What failed, and why (FAIL — configuration, not code)
+
+The credential currently in the environment is **read-only**. That is a property
+of the token, and it is reported rather than hidden:
+
+| Operation | Result |
+| --- | --- |
+| `POST /repos/.../git/blobs` | 403 `Resource not accessible by integration` |
+| `POST .../actions/workflows/android-build.yml/dispatches` | 403 |
+| `POST /api/projects/:id/github/sync` | 502, `blob creation failed: 403 … it needs a fine-grained token with Contents: write and Actions: write …`; no commit sha returned |
+| `POST /api/projects/:id/github/build` | 502 `the project could not be published to GitHub, so no workflow was dispatched`; no `github_runs` row recorded as queued |
+| `GET /api/system/github` | `canWrite: false`, detail: `the credential cannot write to this repository, so publishing and dispatching will fail` |
+
+The integration does not degrade into a false success: a build request with an
+unauthorized credential is refused with the permission that is missing, and no
+run is recorded. The 403 message now names the fix, because GitHub's own text
+("Resource not accessible by integration") names neither the permission nor the
+remedy.
+
+### HOW TO FIX
+
+Grant the server credential, on `rasonjonathan6-coder/app`:
+
+- Contents: Read and write (publish the workspace)
+- Actions: Read and write (dispatch and cancel runs)
+
+For a fine-grained personal access token these are set per repository under
+Settings → Developer settings → Personal access tokens → Fine-grained tokens.
+For a GitHub App, use the same two plus Metadata: Read, and set
+`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_INSTALLATION_ID`, `GITHUB_OWNER`.
+Confirm with `GET /api/system/github`, which must report `canWrite: true` before
+a dispatch is attempted.
+
+### Scope note
+
+The workflow that ran to `success` built the source committed in the repository
+(the `hello` sample, `com.myaistudio.hello`). The SHA-256 and package name above
+describe that build. A publish of a translator workspace followed by a dispatch
+that yields a translator APK is **NOT TESTED in this session**, because the
+publish is what the read-only credential refuses. The publish/dispatch code path
+itself is exercised by five tests that drive a real HTTP server, including a 403
+on the blob write.
+
+`ORACLE DEPLOYMENT`, `CLOUDFLARE PAGES` and `ANDROID EMULATOR` remain NOT TESTED
+or NOT AVAILABLE as recorded above; nothing in this addendum changes that.

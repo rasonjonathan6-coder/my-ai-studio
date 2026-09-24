@@ -72,7 +72,7 @@ on that machine's toolchain.
 | GitHub Actions workflows | PASS | five workflows valid YAML; `android-build.yml` dispatched on a real runner and the job ran to `success` (JDK, Android SDK, tests, `assembleDebug`, APK locate, artifact upload) |
 | GitHub workspace publish | PASS (live) | `POST /api/projects/:id/github/sync` returned HTTP 200 pushing 15 files to `rasonjonathan6-coder/app` (commit `8a9eb825b323…`) and installed the managed workflow on the default branch; the Git Data sequence, `base_tree` preservation and install are also asserted in `CASE 3`/`CASE 3c` |
 | GitHub workflow dispatch | PASS (live) | `POST /api/projects/:id/github/build` returned HTTP 202, `status: queued`; run `36030411740` reached `success`; the APK (3 189 843 bytes) and the 81 KB run log were fetched back through My AI Studio's own routes |
-| GitHub write capability probe | PASS | `canWrite` distinguishes a read-only credential from a writable one; verified live as `true` |
+| GitHub write capability probe | PASS | `canWrite` distinguishes a read-only credential from a writable one; seen `true` under the writable credential used for the publish above. The credential now in this environment is read-only and reports `canWrite: false`, so publish and dispatch are refused with an actionable 403 (see `FINAL_REPORT.md`, 2026-09-24 addendum) |
 | Oracle Cloud deployment | NOT TESTED | no Oracle access; see `ORACLE_SETUP.md` |
 | Cloudflare Pages deployment | NOT TESTED | no Cloudflare access; see `CLOUDFLARE_SETUP.md` |
 | Supabase connection | NOT TESTED | no Supabase project; uses local PostgreSQL |

@@ -32,7 +32,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
+      # The ubuntu runner image presets ANDROID_HOME to /usr/local/lib/android/sdk.
+      # Gradle rejects a build when ANDROID_HOME and ANDROID_SDK_ROOT disagree
+      # ("Several environment variables ... contain different paths to the SDK"),
+      # so both are pointed at the SDK this job installs.
       ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+      ANDROID_HOME: ${{ github.workspace }}/android-sdk
     steps:
       - uses: actions/checkout@v4
 

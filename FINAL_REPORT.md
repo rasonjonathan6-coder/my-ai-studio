@@ -1262,3 +1262,149 @@ GitHub-sync feature wrote generated test projects to — it contains
 `server.js`/`package.json` for the floating-ai-translator sample, not this
 codebase. It is not the source repository and was left untouched.
 
+---
+
+## ADDENDUM — 2026-09-24/25: Android build inside the product sandbox
+
+This session closed the last gap between "the studio can build Android" and "the
+studio itself builds Android". Earlier passes proved `./gradlew assembleDebug`
+on the *host* and on *GitHub runners*; the in-app Build Center was still failing.
+It now succeeds, and the change that made it work is committed.
+
+### What failed, and why
+
+Triggering `POST /api/projects/:id/build` with `{"kind":"android"}` returned
+`status: failed`, `exitCode: 1`. The log tail named nothing useful, but the full
+build record did:
+
+```
+Exception: Could not add entry
+'/tmp/gradle-home/caches/8.9/transforms/.../results.bin'
+to cache fileHashes.bin (/tmp/gradle-home/caches/8.9/fileHashes/fileHashes.bin)
+```
+
+Two separate faults were stacked here.
+
+1. The configured `GRADLE_USER_HOME` (`/home/node/.gradle`) was not writable in
+   the sandbox, so `toolchainEnv()` did its documented fallback and moved the
+   cache to `/tmp/gradle-home`. The backend logged this honestly:
+   `configured GRADLE_USER_HOME is not writable in the sandbox; using an ephemeral cache`.
+2. `/tmp` is not disk. `commandRunner.ts` passes
+   `--tmpfs /tmp:rw,exec,size=512m`, so the fallback cache lived on a 512 MiB
+   tmpfs and Gradle's cache outgrew it. The build log never contains "disk
+   space", "ENOSPC" or "full", which is why the first look suggested a corrupt
+   cache rather than an exhausted one.
+
+A third, separate fault was fixed first: the sandbox image had been built without
+the toolchain (`INSTALL_ANDROID_TOOLCHAIN` defaults to `1` in the compose file,
+but the running image predated that), so `java` was absent and `ANDROID_HOME`
+pointed at a directory that did not exist inside the container.
+
+### The fix
+
+No code change was required. The configuration hooks already existed and were
+documented in `config/index.ts`; the deployment simply was not using them.
+
+```
+INSTALL_ANDROID_TOOLCHAIN=1
+SANDBOX_EXTRA_MOUNTS=/workspace/android-sdk:/opt/android-sdk:ro,/srv/myai-studio-data/gradle:/home/node/.gradle
+ANDROID_HOME=/opt/android-sdk
+```
+
+The Gradle cache directory is created on the host with mode `0777` so uid 1000
+(the sandbox user) can write it. With the path writable, the probe in
+`toolchainEnv()` accepts it, no fallback is logged, and the cache persists across
+builds.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| Toolchain visible in sandbox | `SDK=build-tools cmdline-tools licenses platform-tools platforms`; `openjdk version "17.0.20.1"` |
+| Sandbox `adb` | `Android Debug Bridge version 1.0.41` (real binary at `/opt/android-sdk/platform-tools/adb`) |
+| Sandbox `aapt2` | present at `/opt/android-sdk/build-tools/34.0.0/aapt2` |
+| Build (floating-translator template) | `succeeded`, exit `0`, `134648 ms` |
+| APK | `5637579` bytes, SHA-256 `52952ba432f253a701b32ea1c363c4f3a802059ac61d74dd2495705ddb996903` |
+| Download round-trip | `GET /api/projects/:id/download/apk` returned `5637579` bytes; local `sha256sum` matched the build record exactly |
+| Inspection (`aapt2`) | `com.myaistudio.floatingtranslator` v2.0 (code 2), minSdk 24, targetSdk 34; permissions `SYSTEM_ALERT_WINDOW`, `INTERNET`, `FOREGROUND_SERVICE`; activity `MainActivity` |
+| Export ZIP | `66441` bytes, 23 files; no `.env`, secret, credential, key or `node_modules` entry |
+| Security scan | `clean` |
+| System status | `androidSdk available`, `adb available`, both true in the sandbox where builds run |
+
+Negative results are recorded as-is, not smoothed over. `gradle` still reports
+`not available` because there is no system `gradle` binary: projects use their
+own Gradle 8.9 wrapper, which is the intended design. `androidEmulator` remains
+`not available` (no `/dev/kvm`).
+
+### Real agent run
+
+A WebSocket E2E harness (temporary, deleted after use) drove a genuine agent run
+against a `node-ts` project with the prompt *"Add a small function called greet
+that returns the string hello and make sure the tests pass."*
+
+The run reached `succeeded / completed`, and the failover chain is visible in the
+real event stream: OpenRouter free-model quota exhausted, then Gemini returned no
+text content, then Groq answered. The outcome was confirmed independently on
+disk: `src/math.ts` contains a real
+`export function greet(): string { return 'hello'; }` that was not in the
+template.
+
+Provider status at time of writing: Gemini and Nvidia answered real requests
+(HTTP 200). Groq returned HTTP 429 (quota). OpenRouter's free-model daily quota
+resets at `2026-09-25T00:00:00Z`.
+
+### Local suite
+
+| Command | Result |
+| --- | --- |
+| `npm run lint` | exit 0 |
+| `npm test` | exit 0, backend 201/201, frontend 31/31 |
+| `npm run build` | exit 0, `index` 161.73 kB / 52.13 kB gzip, lazy chunks emitted |
+
+### Secret hygiene
+
+The tracked test fixtures that mention `sk-or-v1-...` were verified to be
+synthetic (`sk-or-v1-012345...`, `sk-or-v1-abcdef...`). A byte-for-byte search for
+the live key across tracked content returned nothing. Only `.env.example` and
+`.env.production.example` are tracked; `.env` is not. The `git remote` URL was
+restored to a token-free form after the push attempt below.
+
+### Repository state and the push limit
+
+The source repository `rasonjonathan6-coder/my-ai-studio` exists and its `main`
+is at `1f2d2f1`, with all four workflows green on that commit:
+
+| Workflow | Run | Result |
+| --- | --- | --- |
+| `build-apk` | `36061611613` | success (5m37s) |
+| `build` | `36061611696` | success |
+| `test` | `36061611693` | success |
+| `security` | `36061611684` | success |
+
+The `build-apk` fix in this session pinned the Android cmdline-tools archive
+(`commandlinetools-linux-11076708_latest.zip`, SHA-256 `2d2d5085...e258`), created
+the SDK directory before moving into it, and aligned `ANDROID_HOME` with the SDK
+the job installs.
+
+One commit is **not** on the remote. `2dca3e1 docs(env): document the sandbox
+mounts Android builds need` is committed locally on `main` and fast-forwards
+cleanly, but the push is refused:
+
+```
+remote: Permission to rasonjonathan6-coder/my-ai-studio.git denied to rasonjonathan6-coder.
+fatal: unable to access '...': The requested URL returned error: 403
+```
+
+The refusal is not a URL or credential-plumbing problem. The credential
+authenticates as `rasonjonathan6-coder`, and the API reports
+`permissions: {admin: true, maintain: true, push: true, triage: true, pull: true}`
+for the repository, yet writes are rejected at the transport layer:
+`Resource not accessible by integration` on a bare `POST /git/refs`, and HTTP 403
+on `POST /issues`. It is a read-only installation token (`ghu_...`). No writable
+credential exists anywhere in this environment (`~/.git-credentials` absent, no
+`gh` hosts file). This is a **NOT POSSIBLE** external block, recorded rather than
+worked around: completing it needs a token with `contents: write`.
+
+The pending commit is documentation only. It adds the `SANDBOX_EXTRA_MOUNTS`
+example and a comment explaining the 512 MiB tmpfs limit, and changes no runtime
+behaviour, so the deployed stack is unaffected by its absence from the remote.

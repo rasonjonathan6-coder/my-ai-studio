@@ -621,3 +621,123 @@ scripts/smoke.sh    -> FAILURES: 0, against the rebuilt container
 The workflows were parsed as YAML and their shell steps were run here. They have
 still never executed on a GitHub runner, and Oracle and Cloudflare are still not
 deployed. GITHUB ACTIONS remains NOT TESTED; see the checklist.
+
+## ADDENDUM — 2026-09-24: FREE_ONLY diagnostic bypass closed, security probes re-run
+
+### The bug
+
+The AI provider diagnostics (`POST /api/ai/providers/:id/test` and
+`POST /api/ai/models/test`) call a provider adapter **directly** instead of
+routing through `AiProviderRouter.chat()`. The FREE_ONLY policy lived only in the
+router, so those two endpoints bypassed it entirely: with `FREE_ONLY=true`, a
+diagnostic against a paid provider was dispatched and returned PASS. That is a
+real paid request under a mode whose entire purpose is not to make one.
+
+The bypass was first demonstrated, then fixed, then re-tested against a network
+canary. `CEREBRAS_BASE_URL` and `MISTRAL_BASE_URL` on the audit container point
+at a local listener, so any outbound paid request is counted as a canary hit.
+
+```
+BEFORE the fix (main image)
+  POST /api/ai/providers/cerebras/test  -> HTTP 200, result PASS
+  POST /api/ai/models/test (mistral)    -> HTTP 200, result PASS
+  canary hits                           -> 2   (real quota spent)
+
+AFTER the fix (rebuilt my-ai-studio-backend:jdk)
+  POST /api/ai/providers/cerebras/test  -> result BLOCKED_BY_FREE_ONLY
+                                           code NO_FREE_PROVIDER_AVAILABLE
+                                           quotaCost "none", durationMs 0
+  POST /api/ai/models/test (mistral)    -> result BLOCKED_BY_FREE_ONLY
+                                           quotaCost "none", durationMs 0
+  canary hits                           -> 0
+```
+
+The gate is now a single method, `AiProviderRouter.freeOnlyRefusal(provider,
+model)`, so the router and the diagnostics consult the same policy rather than
+two copies that can drift. The route helper only shapes the HTTP body.
+
+Covered by four regression tests in `backend/tests/freeOnly.test.ts`: a paid
+provider is refused, a non-free model of a free provider is refused, a free
+provider and its free model are allowed, and everything is allowed when
+FREE_ONLY is off.
+
+### Terminal history now states who ran the command
+
+Migration 003 added a `source` column to `commands` because the terminal history
+could not distinguish a command the user typed from one the agent ran.
+`listCommands()` now returns it, `CommandHistoryEntry` carries it, and
+`TerminalScreen` renders an `agent` badge for rows the user did not type. The
+render was also reading fields (`backend`, `cwd`, `stdout`) that history rows do
+not carry, so it dereferenced `undefined` on every past command; that is fixed.
+
+### Security probes re-run against the live backend
+
+```
+path traversal, read    ?path=../../../../etc/passwd            -> 400 invalid_path
+path traversal, encoded ?path=%2e%2e%2f%2e%2e%2fetc%2fpasswd    -> 400 invalid_path
+path traversal, write   {"path":"../../../../tmp/pwned.txt"}    -> 400 invalid_path
+path traversal, delete  ?path=../../../etc/hostname             -> 400 invalid_path
+null byte in path       "ok.txt\u0000.sh"                       -> 400 invalid_path
+invalid project id      /api/projects/not-a-uuid/file           -> 404 project_not_found
+unauthenticated read    GET /api/projects                       -> 401 auth required
+cross-user read         user2 GET user1 project                 -> 404 project_not_found
+cross-user files        user2 GET user1 project/files           -> 404 project_not_found
+cross-user agent run    user2 POST user1 agent/run              -> 404 project_not_found
+cross-user APK          user2 GET user1 download/apk            -> 404
+/                                (404 not 403, so existence is not disclosed)
+```
+
+Nothing escaped: `/tmp/pwned.txt` was never created.
+
+### Secret scanner — sensitivity *and* specificity
+
+The earlier report showed the clean case. This run also plants a fake key and
+confirms the scanner actually fires, then removes it and confirms it goes quiet
+again. A scanner that never reports is indistinguishable from a scanner that
+cannot.
+
+```
+planted OPENROUTER_API_KEY=sk-or-... in app/src/main/java/SecretLeak.kt
+  -> status findings, 10 files scanned, 3 findings
+     (OPENROUTER_API_KEY, sk-or-key, api_key=  all at line 1)
+  -> full key present in the JSON response? False   (masked sk-o****0000)
+
+build with runSecurityScan:true on that workspace
+  -> build status failed, security status findings, 3 findings
+  -> full key present in the build log? False
+
+after deleting SecretLeak.kt
+  -> status clean, 0 findings
+```
+
+### A filename that survives path validation — investigated, not a live defect
+
+`POST /file` with `path: "evil;rm -rf /;.sh"` returns 201 and creates the name.
+Traversal is blocked and the sandbox never receives a shell string, so this
+cannot currently execute anything: `runCommand` spawns `/bin/sh -c <command>`
+with the command from the API, and no file path is interpolated into it.
+`shellQuote` is applied where paths do reach a shell (the scratch-dir probe).
+It is recorded here rather than silently dropped, because "no live defect" is a
+statement about today's call graph, not a property of the validator.
+
+### Verification after these changes
+
+```
+npm run typecheck   -> exit 0 (backend + frontend)
+npm run lint        -> exit 0 (backend + frontend)
+npm test            -> backend 97/97 pass, frontend 26/26 pass
+npm run build       -> exit 0, frontend built in 802ms
+GET /api/system/status -> 12 probes, real versions, no fabricated PASS
+```
+
+`system/status` reports `gradle NOT_AVAILABLE` (no global Gradle; the wrapper is
+used), `androidEmulator NOT_AVAILABLE` (adb present, no device attached), and
+each unconfigured provider as `NOT_AVAILABLE` with its reason. The paid-provider
+canary endpoints are the only values that changed status in this session.
+
+### Still open
+
+- GITHUB ACTIONS: NOT TESTED — the workflows have never run on a GitHub runner.
+- ORACLE CLOUD / CLOUDFLARE PAGES: NOT TESTED — no deployment performed.
+- ANDROID EMULATOR: NOT AVAILABLE — no device or emulator is attached, so the
+  preview path stays honest and returns `available: false`.

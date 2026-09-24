@@ -12,7 +12,9 @@ export function StatePill({ value }: { value: string | null | undefined }) {
   if (['AVAILABLE', 'CONFIGURED', 'SUCCEEDED', 'PASSED', 'CLEAN', 'OK', 'UP', 'CONNECTED'].includes(v)) kind = 'ok';
   else if (['NOT_AVAILABLE', 'NOT_CONFIGURED', 'UNAVAILABLE', 'SKIPPED'].includes(v)) kind = 'dim';
   else if (['FAILED', 'ERROR', 'DOWN', 'SECURITY_FAILED', 'TIMEOUT'].includes(v)) kind = 'err';
-  else if (['QUEUED', 'RUNNING', 'PENDING', 'BUSY', 'WARN'].includes(v)) kind = 'run';
+  // NOT_TESTED is neither a pass nor a failure: it was never exercised.
+  else if (['NOT_TESTED', 'UNKNOWN'].includes(v)) kind = 'warn';
+  else if (['QUEUED', 'RUNNING', 'PENDING', 'BUSY', 'WARN', 'COOLING_DOWN'].includes(v)) kind = 'run';
   return <Pill state={kind} label={raw.toLowerCase().replace(/_/g, ' ')} />;
 }
 

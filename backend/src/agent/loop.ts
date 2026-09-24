@@ -233,8 +233,10 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunOutcom
   });
 
   const messages: ChatMessage[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'system', content: contextPrompt },
+    // One system message, not two. Gemini's OpenAI-compatible surface rejects
+    // consecutive system turns with MALFORMED_FUNCTION_CALL, and a single
+    // system block is accepted by every provider.
+    { role: 'system', content: `${SYSTEM_PROMPT}\n\n${contextPrompt}` },
     { role: 'user', content: prompt },
   ];
 

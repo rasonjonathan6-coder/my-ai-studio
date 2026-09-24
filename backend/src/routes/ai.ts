@@ -11,7 +11,7 @@ import { z } from 'zod';
 import { config } from '../config/index.ts';
 import { asyncHandler, validate } from '../middleware/validate.ts';
 import { requireAuth } from '../middleware/auth.ts';
-import { aiRouter, PROVIDER_IDS, isProviderId, type ProviderId } from '../services/aiProvider.ts';
+import { aiRouter, PROVIDER_IDS, isProviderId, type ProviderAdapter, type ProviderId } from '../services/aiProvider.ts';
 import { logger, redact } from '../lib/logger.ts';
 
 const router = Router();
@@ -19,6 +19,7 @@ const router = Router();
 function providerSummary(): Array<{
   id: ProviderId;
   label: string;
+  local: boolean;
   configured: boolean;
   status: 'CONFIGURED' | 'NOT_CONFIGURED';
   connection: 'NOT_TESTED';
@@ -27,6 +28,7 @@ function providerSummary(): Array<{
   cooling: boolean;
   cooldownUntil: string | null;
   cooldownReason: string | null;
+  capabilities: ReturnType<ProviderAdapter['capabilities']>;
 }> {
   const cooldowns = aiRouter.cooldownState();
   return aiRouter.providers().map((p) => {
@@ -35,6 +37,7 @@ function providerSummary(): Array<{
     return {
       id: p.id,
       label: p.label,
+      local: p.local,
       configured: s.configured,
       status: s.configured ? 'CONFIGURED' as const : 'NOT_CONFIGURED' as const,
       // Connection is only proven by a real request through the test endpoint.
@@ -44,28 +47,95 @@ function providerSummary(): Array<{
       cooling: c.cooling,
       cooldownUntil: c.until,
       cooldownReason: c.reason,
+      capabilities: p.capabilities(),
     };
   });
+}
+
+/**
+ * The single provider a request would use right now, with the reason. Derived
+ * from the router's real order and cooldown state, never from a guess.
+ */
+function currentProvider(): {
+  provider: ProviderId | null;
+  label: string | null;
+  model: string | null;
+  reason: string;
+} {
+  const auto = aiRouter.autoOrder();
+  const first = auto.ready[0];
+  if (first) {
+    const s = aiRouter.adapter(first).status();
+    return {
+      provider: first,
+      label: aiRouter.adapter(first).label,
+      model: s.model || null,
+      reason: 'Primary provider: first configured provider in priority order that is not cooling',
+    };
+  }
+  if (auto.cooling.length > 0) {
+    return {
+      provider: null,
+      label: null,
+      model: null,
+      reason: 'All configured providers are cooling down after a limit response',
+    };
+  }
+  return {
+    provider: null,
+    label: null,
+    model: null,
+    reason: auto.unconfigured.length === PROVIDER_IDS.length
+      ? 'No provider is configured on the server'
+      : 'No configured provider is available',
+  };
+}
+
+/** Order in which AUTO would try providers, before cooldown filtering. */
+function priorityOrder(): ProviderId[] {
+  const seen = new Set<ProviderId>();
+  const order: ProviderId[] = [];
+  for (const raw of config.aiProviderPriority) {
+    if (isProviderId(raw) && !seen.has(raw)) {
+      seen.add(raw);
+      order.push(raw);
+    }
+  }
+  for (const id of PROVIDER_IDS) if (!seen.has(id)) order.push(id);
+  return order;
 }
 
 /** Shared by /api/ai/providers and /api/system/info. */
 export function aiProviderStatus(): {
   defaultProvider: string;
   order: string[];
+  priority: string[];
   cooldownMs: number;
   providers: ReturnType<typeof providerSummary>;
+  providerStates: ReturnType<typeof aiRouter.providerStates>;
+  current: ReturnType<typeof currentProvider>;
   auto: ReturnType<typeof aiRouter.autoOrder>;
   recentAttempts: ReturnType<typeof aiRouter.recentAttempts>;
+  requestCounters: ReturnType<typeof aiRouter.requestCounters>;
+  quotaRemaining: 'unknown';
 } {
   // The auto view is also used to drive the frontend selector, so paths are
   // reported per provider and no request is made here.
+  const auto = aiRouter.autoOrder();
   return {
     defaultProvider: config.aiDefaultProvider,
-    order: aiRouter.autoOrder().ready.concat(aiRouter.autoOrder().cooling, aiRouter.autoOrder().unconfigured),
+    order: auto.ready.concat(auto.cooling, auto.unconfigured),
+    priority: priorityOrder(),
     cooldownMs: config.aiProviderCooldownMs,
     providers: providerSummary(),
-    auto: aiRouter.autoOrder(),
+    providerStates: aiRouter.providerStates(),
+    current: currentProvider(),
+    auto,
     recentAttempts: aiRouter.recentAttempts(),
+    // Observed request counts only; no provider API exposes a remaining quota,
+    // so that figure is reported as unknown instead of being invented.
+    requestCounters: aiRouter.requestCounters(),
+    quotaRemaining: 'unknown',
   };
 }
 
@@ -80,6 +150,51 @@ const testSchema = z.object({
 
 /** Model ids contain letters, digits and the punctuation providers actually use. */
 const MODEL_PATTERN = /^[A-Za-z0-9._:/-]+$/;
+
+/**
+ * Checks a provider is reachable and its credentials are accepted without
+ * spending any completion quota: it asks for the model list, which is a
+ * read-only call billed as zero tokens. A provider can be CONFIGURED and still
+ * fail this, which is exactly the distinction the UI needs to show.
+ */
+router.post('/providers/:id/probe', requireAuth, asyncHandler(async (req, res) => {
+  const id = req.params.id;
+  if (!isProviderId(id)) {
+    res.status(400).json({ error: 'unknown provider', allowed: PROVIDER_IDS });
+    return;
+  }
+  const adapter = aiRouter.adapter(id);
+  const status = adapter.status();
+  if (!status.configured) {
+    res.json({
+      provider: id,
+      label: adapter.label,
+      result: 'NOT_CONFIGURED',
+      endpoint: status.baseUrl,
+      quotaCost: 'none',
+      message: `${adapter.label} is not configured on the server.`,
+    });
+    return;
+  }
+
+  const started = Date.now();
+  const outcome = await adapter.listModels();
+  const durationMs = Date.now() - started;
+  logger.info('ai provider probe', { provider: id, ok: outcome.ok, durationMs, models: outcome.models.length });
+
+  res.json({
+    provider: id,
+    label: adapter.label,
+    result: outcome.ok ? 'REACHABLE' : 'FAIL',
+    endpoint: status.baseUrl,
+    // The list-models call consumes no completion tokens, unlike /test.
+    quotaCost: 'none',
+    models: outcome.models.slice(0, 50),
+    modelCount: outcome.models.length,
+    durationMs,
+    message: outcome.ok ? null : redact(outcome.error ?? 'probe failed').slice(0, 300),
+  });
+}));
 
 router.post('/providers/:id/test', requireAuth, asyncHandler(async (req, res) => {
   const id = req.params.id;
@@ -117,6 +232,10 @@ router.post('/providers/:id/test', requireAuth, asyncHandler(async (req, res) =>
   const durationMs = Date.now() - started;
 
   if (outcome.ok) {
+    // A real success is a fact about the provider, so it becomes available in
+    // the shared state. Otherwise the UI would show PASS while /api/ai/providers
+    // still reported the provider as never exercised.
+    aiRouter.noteTest(id, outcome);
     logger.info('ai provider test', { provider: id, http: 200, durationMs, model: outcome.model });
     res.json({
       provider: id,
@@ -126,7 +245,10 @@ router.post('/providers/:id/test', requireAuth, asyncHandler(async (req, res) =>
       endpoint: status.baseUrl,
       http: 200,
       durationMs,
+      // A completion test spends real quota; saying so lets the UI warn first.
+      quotaCost: 'one completion',
       usage: outcome.usage,
+      rateLimit: outcome.rateLimit,
       reply: outcome.content.slice(0, 200),
     });
     return;
@@ -145,6 +267,8 @@ router.post('/providers/:id/test', requireAuth, asyncHandler(async (req, res) =>
     endpoint: status.baseUrl,
     http: outcome.status ?? null,
     kind: outcome.kind,
+    classification: outcome.classification ?? null,
+    quotaExhausted: outcome.quotaExhausted === true,
     durationMs,
     message: redact(outcome.message).slice(0, 500),
   });
@@ -175,7 +299,9 @@ router.post('/providers/:id/auto-probe', requireAuth, asyncHandler(async (_req, 
     ok: outcome.ok,
     answeredBy: outcome.ok ? outcome.provider : null,
     failoverFrom: outcome.ok ? outcome.failoverFrom : null,
+    // The full trail is returned so the failover chain is visible, not implied.
     attempts: outcome.attempts,
+    quotaCost: 'one completion per attempted provider',
     message: outcome.ok ? null : redact(outcome.message).slice(0, 500),
   });
 }));

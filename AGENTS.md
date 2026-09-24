@@ -66,43 +66,78 @@ root-level install.
 
 ## Model integration
 
-Three providers are supported: OpenRouter (`OPENROUTER_*`), Google Gemini
-(`GEMINI_*`, reached through its OpenAI-compatible endpoint) and Groq
-(`GROQ_*`). Every key is read server-side only and must never reach the frontend
-bundle, an APK, a log, an exported ZIP or a response body. `*_BASE_URL` exists so
-a local stand-in can be used for testing without spending quota.
+Twelve providers share one router. Three are first-class: OpenRouter
+(`OPENROUTER_*`), Google Gemini (`GEMINI_*`, via its OpenAI-compatible endpoint)
+and Groq (`GROQ_*`). Nine more are wired the same way and stay out of rotation
+until their key is set: Cerebras, Mistral, Cloudflare (needs both
+`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`), NVIDIA, Hugging Face
+(`HF_TOKEN`), Chutes, SambaNova, plus the local `ollama` and `vllm` runtimes,
+which use a URL and no key. Every key is read server-side only and must never
+reach the frontend bundle, an APK, a log, an exported ZIP or a response body.
+`*_BASE_URL` exists so a local stand-in can be used for testing without spending
+quota; the test suite relies on this.
 
-`AI_DEFAULT_PROVIDER` (`auto` by default) and `AI_PROVIDER_ORDER`
-(`openrouter,gemini,groq`) decide which provider serves a run:
+`AI_DEFAULT_PROVIDER` (`auto` by default) and `AI_PROVIDER_PRIORITY`
+(`openrouter,gemini,groq,...`) decide which provider serves a run.
+`AI_PROVIDER_ORDER` is the older name for the same setting and is still honoured
+as a fallback:
 
-- `auto` walks the order and fails over **only** on temporary conditions
+- `auto` walks the priority and fails over **only** on temporary conditions
   (`rate_limited`, `quota_exhausted`, `timeout`, `network_error`, 5xx). A 400,
   401 or 403 surfaces immediately: a bad key must stay visible instead of being
   masked by a failover that would make every provider look broken.
 - A named provider pins the run to it; failure is reported, never silently
-  switched away from.
-- A provider that hit a hard quota or a throttle enters a cooldown
-  (`AI_PROVIDER_COOLDOWN_MS`, default 5 min) and is skipped by later AUTO runs.
-  `POST /api/ai/providers/:id/reset` clears it.
+  switched away from. A pinned failure still records its cooldown, so a later
+  AUTO run does not walk straight back into a provider just proven unavailable.
+- A provider that hit a hard quota or a throttle enters a cooldown that
+  escalates on repeat (`AI_PROVIDER_COOLDOWN_MS` -> 1m -> 5m, capped at
+  `AI_PROVIDER_COOLDOWN_MAX_MS`, default 15m). The provider's own `Retry-After`
+  always wins, and a success resets the ladder to zero.
+  `POST /api/ai/providers/:id/reset` clears it and resets the ladder.
 - `POST /api/ai/providers/:id/test` performs a real completion and reports the
-  observed HTTP status; a provider is never labelled connected without a round
-  trip. `connection` stays `NOT_TESTED` until then.
+  observed HTTP status and the error classification; a provider is never labelled
+  connected without a round trip. `connection` stays `NOT_TESTED` until then.
+- `POST /api/ai/providers/:id/probe` checks reachability by listing models. It
+  answers whether the provider is up without spending completion quota.
+- `POST /api/ai/providers/auto/auto-probe` runs one real request through the AUTO
+  path and returns the full attempt trail, so the failover chain can be observed
+  rather than assumed.
+- `GET /api/ai/providers` returns a `providerStates` array whose every field is an
+  observed fact. A value that was never observed is `null`, never a plausible
+  default: an untouched provider reports `lastStatusCode: null`, not `200`.
 
 `ChatFailure.kind` has no `quota_exhausted` member: an exhausted quota stays
 `rate_limited` with `quotaExhausted: true` and `retryable: false`, so callers
 that switch on `kind` keep working and the reset instant travels as
-`retryAfterMs`. The agent loop only waits out a throttle that is actually
-retryable.
+`retryAfterMs`. `classification` carries the finer label (`QUOTA_RATE_LIMIT`,
+`TEMPORARY_FAILURE`, `AUTHENTICATION`, `BAD_REQUEST`). The agent loop only waits
+out a throttle that is actually retryable.
 
 Free-tier behaviour worth remembering:
 
+- Groq's `gpt-oss-*` models cannot serve the agent. They ship a built-in
+  `repo_browser` tool that fires on tool-shaped prompts and is rejected by the
+  API with HTTP 400 `tool_use_failed` ("Tool choice is none, but model called a
+  tool"), regardless of `tool_choice`, an empty `tools` array,
+  `reasoning_effort`, or `parallel_tool_calls`. Groq's default model is
+  therefore `qwen/qwen3.8-27b`, which follows the text JSON protocol. Verified
+  by direct API calls, not inferred.
+- Groq's free tier caps tokens **per minute** (8000 on `qwen/qwen3.8-27b`) as
+  well as requests. A multi-turn agent run easily spends that budget, so a run
+  can fail partway with `rate_limited` after several successful turns. The
+  workspace changes made before the limit are real and are kept.
 - `openrouter/free` is capped **per day** (50 requests), not per minute. An
   exhausted quota returns 429 with `free-models-per-day` in the body and
   `X-RateLimit-Reset` (epoch milliseconds) in the headers. The client does not
-  retry this inside a run; it reports the reset time.
+  retry this inside a run; it reports the reset time. The free alias also routes
+  to an unspecified backend, so a named free model
+  (`qwen/qwen3.8-27b:free`) is the default.
 - A plain 429 without that marker is a transient throttle and is retried with
   backoff, honouring `Retry-After` when present.
 - The API key must never be echoed, even partially, when reporting an error.
+- No provider API exposes a remaining-quota figure. The UI shows request counts
+  the router itself observed (`requestCounters`) and reports the remaining quota
+  as `unknown`; inventing a number would be worse than reporting none.
 
 ## Verifying the agent loop without a model
 

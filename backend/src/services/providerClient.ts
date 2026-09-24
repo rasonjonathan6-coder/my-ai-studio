@@ -31,7 +31,24 @@ export interface ChatResult {
   content: string;
   model: string;
   usage: { promptTokens: number; completionTokens: number; totalTokens: number };
+  /** Rate-limit headers the provider actually returned, or null when absent. */
+  rateLimit: RateLimitInfo | null;
   raw: unknown;
+}
+
+/**
+ * What a provider told us about its own limits. Every field is null when the
+ * provider did not send the header: an unknown value stays unknown rather than
+ * being defaulted to something plausible.
+ */
+export interface RateLimitInfo {
+  limitRequests: number | null;
+  remainingRequests: number | null;
+  limitTokens: number | null;
+  remainingTokens: number | null;
+  resetRequestsAt: string | null;
+  resetTokensAt: string | null;
+  retryAfterAt: string | null;
 }
 
 export interface ChatFailure {
@@ -42,6 +59,12 @@ export interface ChatFailure {
   retryable: boolean;
   retryAfterMs?: number;
   /**
+   * Coarse classification of the failure for operators and the UI. Additive
+   * alongside `kind` so existing switches keep working; it separates an
+   * exhausted quota from an auth problem, which are otherwise both 4xx.
+   */
+  classification?: FailureClass;
+  /**
    * True when a 429 was a hard quota (daily free-model allowance, provider
    * credit exhaustion) rather than a short throttle. Like `retryable` this is
    * a property of a rate_limited failure, not a separate kind, so callers that
@@ -49,6 +72,15 @@ export interface ChatFailure {
    */
   quotaExhausted?: boolean;
 }
+
+export type FailureClass =
+  | 'QUOTA_RATE_LIMIT'
+  | 'AUTHENTICATION'
+  | 'PERMISSION'
+  | 'BAD_REQUEST'
+  | 'TEMPORARY_FAILURE'
+  | 'MODEL_UNAVAILABLE'
+  | 'NOT_CONFIGURED';
 
 export type ChatOutcome = ChatResult | ChatFailure;
 
@@ -67,6 +99,28 @@ export interface ProviderSettings {
    * A matched body means retrying inside the same run is pointless.
    */
   quotaPatterns: RegExp[];
+  /**
+   * False for a local runtime (Ollama, vLLM), where the absence of an API key
+   * is normal. Configuration is then decided by whether a base URL is set.
+   */
+  requiresApiKey?: boolean;
+  /** What the provider can be trusted to do for the agent. */
+  capabilities?: ProviderCapabilities;
+}
+
+/**
+ * Honest description of a provider's agent support. A provider that only knows
+ * plain chat is labelled CHAT_ONLY rather than presented as a full OpenHands
+ * backend, because the agent drives its tools through structured JSON replies.
+ */
+export interface ProviderCapabilities {
+  /** Follows the agent's text JSON tool protocol. */
+  agent: boolean;
+  chat: boolean;
+  streaming: boolean;
+  jsonMode: boolean;
+  /** Set when agent support is partial, with the reason shown to operators. */
+  agentNote?: string;
 }
 
 export class OpenAiCompatibleClient {
@@ -77,7 +131,10 @@ export class OpenAiCompatibleClient {
   }
 
   public isConfigured(): boolean {
-    return this.settings().apiKey.trim().length > 0;
+    const s = this.settings();
+    // A local runtime has no key by design; its base URL is what must be set.
+    if (s.requiresApiKey === false) return s.baseUrl.trim().length > 0;
+    return s.apiKey.trim().length > 0;
   }
 
   public status(): { configured: boolean; model: string; baseUrl: string; name: string } {
@@ -85,9 +142,46 @@ export class OpenAiCompatibleClient {
     return { configured: this.isConfigured(), model: s.model, baseUrl: s.baseUrl, name: s.name };
   }
 
+  /** Capabilities as declared by the provider wrapper. */
+  public capabilities(): ProviderCapabilities {
+    return this.settings().capabilities ?? { agent: true, chat: true, streaming: false, jsonMode: false };
+  }
+
+  /**
+   * Reads the rate-limit headers a provider actually sent. Providers differ in
+   * naming, so both the OpenAI (`x-ratelimit-*`) and the older variants are
+   * checked. A missing header yields null and is never guessed at.
+   */
+  private static parseRateLimit(headers: Headers): RateLimitInfo {
+    const num = (name: string): number | null => {
+      const raw = headers.get(name);
+      if (raw === null || raw.trim() === '') return null;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    };
+    // Reset values are durations in some APIs and epochs in others. A value
+    // large enough to be an epoch millisecond is treated as one; small values
+    // are treated as seconds from now. Anything else stays null.
+    const instant = (name: string): string | null => {
+      const n = num(name);
+      if (n === null || n <= 0) return null;
+      const ms = n > 1e12 ? n : n > 1e9 ? n * 1000 : Date.now() + n * 1000;
+      return new Date(ms).toISOString();
+    };
+    return {
+      limitRequests: num('x-ratelimit-limit-requests'),
+      remainingRequests: num('x-ratelimit-remaining-requests'),
+      limitTokens: num('x-ratelimit-limit-tokens'),
+      remainingTokens: num('x-ratelimit-remaining-tokens'),
+      resetRequestsAt: instant('x-ratelimit-reset-requests'),
+      resetTokensAt: instant('x-ratelimit-reset-tokens'),
+      retryAfterAt: instant('retry-after'),
+    };
+  }
+
   public async listModels(): Promise<{ ok: boolean; models: string[]; error?: string }> {
     const s = this.settings();
-    if (!s.apiKey.trim()) return { ok: false, models: [], error: `${s.name} API key not configured` };
+    if (!this.isConfigured()) return { ok: false, models: [], error: `${s.name} is not configured` };
     try {
       const res = await this.fetchWithTimeout(`${s.baseUrl}/models`, {
         method: 'GET',
@@ -105,11 +199,13 @@ export class OpenAiCompatibleClient {
 
   public async chat(options: ChatOptions): Promise<ChatOutcome> {
     const s = this.settings();
-    if (!s.apiKey.trim()) {
+    if (!this.isConfigured()) {
       return {
         ok: false,
         kind: 'not_configured',
-        message: `${s.name} API key is not configured on the server.`,
+        message: s.requiresApiKey === false
+          ? `${s.name} has no base URL configured on the server.`
+          : `${s.name} API key is not configured on the server.`,
         retryable: false,
       };
     }
@@ -163,32 +259,44 @@ export class OpenAiCompatibleClient {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (/abort/i.test(message)) {
-        return { ok: false, kind: 'aborted', message: 'request aborted', retryable: false };
+        return { ok: false, kind: 'aborted', message: 'request aborted', retryable: false, classification: 'BAD_REQUEST' };
       }
       if (/timeout|ETIMEDOUT/i.test(message)) {
-        return { ok: false, kind: 'timeout', message: `request timed out after ${timeoutMs}ms`, retryable: true };
+        return { ok: false, kind: 'timeout', message: `request timed out after ${timeoutMs}ms`, retryable: true, classification: 'TEMPORARY_FAILURE' };
       }
-      return { ok: false, kind: 'network_error', message: redact(message), retryable: true };
+      return { ok: false, kind: 'network_error', message: redact(message), retryable: true, classification: 'TEMPORARY_FAILURE' };
     }
 
     if (res.status === 429) return this.mapRateLimit(s, res);
 
     if (res.status === 402) {
-      return { ok: false, kind: 'model_unavailable', message: 'insufficient credits for this model', status: 402, retryable: false };
+      return { ok: false, kind: 'model_unavailable', message: 'insufficient credits for this model', status: 402, retryable: false, classification: 'QUOTA_RATE_LIMIT' };
     }
     if (res.status === 404) {
-      return { ok: false, kind: 'model_unavailable', message: `model "${model}" not available on ${s.name}`, status: 404, retryable: false };
+      return { ok: false, kind: 'model_unavailable', message: `model "${model}" not available on ${s.name}`, status: 404, retryable: false, classification: 'MODEL_UNAVAILABLE' };
     }
     // Authentication and request errors are configuration problems, not limits.
     // Reporting them as such keeps the router from silently hiding a bad key.
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401) {
       const text = await res.text().catch(() => '');
       return {
         ok: false,
         kind: 'http_error',
-        message: `${s.name} rejected the credentials (HTTP ${res.status}): ${redact(text).slice(0, 300)}`,
-        status: res.status,
+        message: `${s.name} rejected the credentials (HTTP 401): ${redact(text).slice(0, 300)}`,
+        status: 401,
         retryable: false,
+        classification: 'AUTHENTICATION',
+      };
+    }
+    if (res.status === 403) {
+      const text = await res.text().catch(() => '');
+      return {
+        ok: false,
+        kind: 'http_error',
+        message: `${s.name} denied access (HTTP 403): ${redact(text).slice(0, 300)}`,
+        status: 403,
+        retryable: false,
+        classification: 'PERMISSION',
       };
     }
     if (res.status === 400) {
@@ -199,10 +307,11 @@ export class OpenAiCompatibleClient {
         message: `${s.name} rejected the request (HTTP 400): ${redact(text).slice(0, 300)}`,
         status: 400,
         retryable: false,
+        classification: 'BAD_REQUEST',
       };
     }
     if (res.status >= 500) {
-      return { ok: false, kind: 'http_error', message: `${s.name} server error HTTP ${res.status}`, status: res.status, retryable: true };
+      return { ok: false, kind: 'http_error', message: `${s.name} server error HTTP ${res.status}`, status: res.status, retryable: true, classification: 'TEMPORARY_FAILURE' };
     }
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -212,6 +321,7 @@ export class OpenAiCompatibleClient {
         message: `HTTP ${res.status}: ${redact(text).slice(0, 500)}`,
         status: res.status,
         retryable: false,
+        classification: 'BAD_REQUEST',
       };
     }
 
@@ -219,11 +329,14 @@ export class OpenAiCompatibleClient {
     try {
       payload = await res.json();
     } catch {
-      return { ok: false, kind: 'invalid_response', message: 'response was not valid JSON', retryable: true };
+      return { ok: false, kind: 'invalid_response', message: 'response was not valid JSON', retryable: true, classification: 'TEMPORARY_FAILURE' };
     }
 
     const parsed = payload as {
-      choices?: Array<{ message?: { content?: string | null }; finish_reason?: string }>;
+      choices?: Array<{
+        message?: { content?: string | null; tool_calls?: unknown[]; refusal?: string | null };
+        finish_reason?: string;
+      }>;
       usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
       model?: string;
       error?: { message?: string; code?: number };
@@ -239,8 +352,20 @@ export class OpenAiCompatibleClient {
       };
     }
 
-    const content = parsed.choices?.[0]?.message?.content;
+    const choice = parsed.choices?.[0];
+    const content = choice?.message?.content;
     if (typeof content !== 'string' || content.length === 0) {
+      // An empty completion is usually a provider quirk (a filtered or
+      // truncated choice), so the shape is recorded to make the cause
+      // diagnosable from logs instead of guessed at.
+      logger.warn('provider returned no text content', {
+        provider: s.name,
+        model,
+        finishReason: choice?.finish_reason ?? null,
+        hasToolCalls: Array.isArray(choice?.message?.tool_calls) && choice.message.tool_calls.length > 0,
+        refusal: choice?.message?.refusal ?? null,
+        choiceCount: parsed.choices?.length ?? 0,
+      });
       return { ok: false, kind: 'invalid_response', message: 'completion contained no text content', retryable: true };
     }
 
@@ -253,6 +378,7 @@ export class OpenAiCompatibleClient {
         completionTokens: parsed.usage?.completion_tokens ?? 0,
         totalTokens: parsed.usage?.total_tokens ?? 0,
       },
+      rateLimit: OpenAiCompatibleClient.parseRateLimit(res.headers),
       raw: payload,
     };
   }
@@ -296,6 +422,7 @@ export class OpenAiCompatibleClient {
         status: 429,
         retryable: false,
         quotaExhausted: true,
+        classification: 'QUOTA_RATE_LIMIT',
         retryAfterMs: resetAtMs ? Math.max(resetAtMs - Date.now(), 0) : undefined,
       };
     }
@@ -306,6 +433,7 @@ export class OpenAiCompatibleClient {
       message: retryAfterMs ? `rate limited by ${s.name} (retry after ${retryAfterMs}ms)` : `rate limited by ${s.name}`,
       status: 429,
       retryable: true,
+      classification: 'QUOTA_RATE_LIMIT',
       retryAfterMs,
     };
   }

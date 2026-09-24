@@ -62,7 +62,9 @@ export const config = {
   sessionCookieSecure,
 
   openRouterApiKey: env('OPENROUTER_API_KEY'),
-  openRouterModel: env('OPENROUTER_MODEL', 'openrouter/free'),
+  // A precise free coding model performs better than the generic
+  // 'openrouter/free' alias, which routes to an unspecified backend.
+  openRouterModel: env('OPENROUTER_MODEL', 'qwen/qwen3.8-27b:free'),
   openRouterBaseUrl: env('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1'),
   openRouterTimeoutMs: int('OPENROUTER_TIMEOUT_MS', 120000),
   openRouterMaxRetries: int('OPENROUTER_MAX_RETRIES', 3),
@@ -78,20 +80,78 @@ export const config = {
   geminiTimeoutMs: int('GEMINI_TIMEOUT_MS', 120000),
 
   groqApiKey: env('GROQ_API_KEY'),
-  groqModel: env('GROQ_MODEL', 'openai/gpt-oss-120b'),
+  // The agent drives its tools through a text JSON protocol, not native tool
+  // calling. Groq's gpt-oss models ship a built-in repo_browser tool that
+  // intercepts tool-ish prompts and rejects the turn with HTTP 400
+  // tool_use_failed, so qwen (which follows the protocol) is the default.
+  groqModel: env('GROQ_MODEL', 'qwen/qwen3.8-27b'),
   groqBaseUrl: env('GROQ_BASE_URL', 'https://api.groq.com/openai/v1'),
   groqTimeoutMs: int('GROQ_TIMEOUT_MS', 120000),
+
+  // --- Additional providers, each calling its own official API directly. ---
+  // Every one is optional: an absent key means NOT_CONFIGURED, not an error.
+  cerebrasApiKey: env('CEREBRAS_API_KEY'),
+  cerebrasModel: env('CEREBRAS_MODEL', 'qwen-3-235b-a22b-instruct-2507'),
+  cerebrasBaseUrl: env('CEREBRAS_BASE_URL', 'https://api.cerebras.ai/v1'),
+  cerebrasTimeoutMs: int('CEREBRAS_TIMEOUT_MS', 120000),
+
+  mistralApiKey: env('MISTRAL_API_KEY'),
+  mistralModel: env('MISTRAL_MODEL', 'mistral-small-latest'),
+  mistralBaseUrl: env('MISTRAL_BASE_URL', 'https://api.mistral.ai/v1'),
+  mistralTimeoutMs: int('MISTRAL_TIMEOUT_MS', 120000),
+
+  // Cloudflare has no OpenAI-compatible root: the account id is part of the
+  // path, so the adapter builds the URL rather than reading a fixed base.
+  cloudflareApiToken: env('CLOUDFLARE_API_TOKEN'),
+  cloudflareAccountId: env('CLOUDFLARE_ACCOUNT_ID'),
+  cloudflareModel: env('CLOUDFLARE_MODEL', '@cf/meta/llama-3.1-8b-instruct'),
+  cloudflareTimeoutMs: int('CLOUDFLARE_TIMEOUT_MS', 120000),
+
+  nvidiaApiKey: env('NVIDIA_API_KEY'),
+  nvidiaModel: env('NVIDIA_MODEL', 'nvidia/llama-3.3-nemotron-super-49b-v1'),
+  nvidiaBaseUrl: env('NVIDIA_BASE_URL', 'https://integrate.api.nvidia.com/v1'),
+  nvidiaTimeoutMs: int('NVIDIA_TIMEOUT_MS', 120000),
+
+  // Hugging Face routes to whichever backend the model lists. Free credit is
+  // small, so its priority is last among remote providers by default.
+  hfToken: env('HF_TOKEN'),
+  hfModel: env('HF_MODEL', 'Qwen/Qwen2.5-7B-Instruct'),
+  hfBaseUrl: env('HF_BASE_URL', 'https://router.huggingface.co/v1'),
+  hfTimeoutMs: int('HF_TIMEOUT_MS', 120000),
+
+  chutesApiKey: env('CHUTES_API_KEY'),
+  chutesModel: env('CHUTES_MODEL', 'deepseek-ai/DeepSeek-V3-0324'),
+  chutesBaseUrl: env('CHUTES_BASE_URL', 'https://llm.chutes.ai/v1'),
+  chutesTimeoutMs: int('CHUTES_TIMEOUT_MS', 120000),
+
+  sambanovaApiKey: env('SAMBANOVA_API_KEY'),
+  sambanovaModel: env('SAMBANOVA_MODEL', 'Meta-Llama-3.3-70B-Instruct'),
+  sambanovaBaseUrl: env('SAMBANOVA_BASE_URL', 'https://api.sambanova.ai/v1'),
+  sambanovaTimeoutMs: int('SAMBANOVA_TIMEOUT_MS', 120000),
+
+  // Local runtimes. No API key: availability is "is something listening here",
+  // which is probed by the health check without generating any token.
+  ollamaBaseUrl: env('OLLAMA_BASE_URL', ''),
+  ollamaModel: env('OLLAMA_MODEL', 'qwen2.5-coder:7b'),
+  ollamaTimeoutMs: int('OLLAMA_TIMEOUT_MS', 120000),
+  vllmBaseUrl: env('VLLM_BASE_URL', ''),
+  vllmModel: env('VLLM_MODEL', ''),
+  vllmTimeoutMs: int('VLLM_TIMEOUT_MS', 120000),
 
   // Which provider the agent uses by default. 'auto' walks providerOrder and
   // fails over on temporary limits only; a named provider pins the run to it.
   aiDefaultProvider: env('AI_DEFAULT_PROVIDER', 'auto'),
-  aiProviderOrder: env('AI_PROVIDER_ORDER', 'openrouter,gemini,groq')
+  // AI_PROVIDER_PRIORITY is the documented forward-looking name; the older
+  // AI_PROVIDER_ORDER is still honoured so existing deployments keep working.
+  aiProviderPriority: env('AI_PROVIDER_PRIORITY', env('AI_PROVIDER_ORDER', 'openrouter,gemini,groq'))
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean),
   // How long a provider stays out of the rotation after a quota/rate-limit
   // response, so a run does not hammer a provider that is known to be down.
-  aiProviderCooldownMs: int('AI_PROVIDER_COOLDOWN_MS', 5 * 60 * 1000),
+  // This is the first backoff step; repeated limits escalate up to the cap.
+  aiProviderCooldownMs: int('AI_PROVIDER_COOLDOWN_MS', 30 * 1000),
+  aiProviderCooldownMaxMs: int('AI_PROVIDER_COOLDOWN_MAX_MS', 15 * 60 * 1000),
 
   workspaceRoot: path.resolve(env('WORKSPACE_PATH', path.join(process.cwd(), 'workspace-data', 'projects'))),
   storageRoot: path.resolve(env('STORAGE_PATH', path.join(process.cwd(), 'workspace-data', 'storage'))),

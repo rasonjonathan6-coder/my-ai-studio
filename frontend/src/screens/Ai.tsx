@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, type ProviderSelection } from '../api/client.ts';
+import { api } from '../api/client.ts';
 import { Card, Empty, StatePill, Spinner } from '../components/ui.tsx';
 import { AGENT_STEPS, stepIndex } from '../lib/steps.ts';
-import type { AgentRun, AiProvidersResponse, Message, WsEvent } from '../api/types.ts';
+import type { AgentRun, AiProvider, AiProvidersResponse, Message, ProviderId, ProviderSelection, WsEvent } from '../api/types.ts';
 
 export interface AgentProgress { phase: string; status: string; fixAttempts: number; maxFixAttempts: number }
 
 const PROVIDER_LABEL: Record<string, string> = {
-  auto: 'AUTO', openrouter: 'OpenRouter', gemini: 'Gemini', groq: 'Groq',
+  auto: 'AUTO',
+  openrouter: 'OpenRouter', gemini: 'Gemini', groq: 'Groq', cerebras: 'Cerebras',
+  mistral: 'Mistral', cloudflare: 'Cloudflare', nvidia: 'NVIDIA', huggingface: 'Hugging Face',
+  chutes: 'Chutes', sambanova: 'SambaNova', ollama: 'Ollama (local)', vllm: 'vLLM (local)',
 };
 
 export function AiScreen({ projectId, socketConnected, events, onAgentState }: {
@@ -217,7 +220,7 @@ export function AiScreen({ projectId, socketConnected, events, onAgentState }: {
   );
 }
 
-function ProviderPanel({ providers, selected, onSelect, disabled, onChanged, onError }: {
+export function ProviderPanel({ providers, selected, onSelect, disabled, onChanged, onError }: {
   providers: AiProvidersResponse | null;
   selected: ProviderSelection;
   onSelect: (p: ProviderSelection) => void;
@@ -227,7 +230,10 @@ function ProviderPanel({ providers, selected, onSelect, disabled, onChanged, onE
 }) {
   const [testing, setTesting] = useState<string | null>(null);
   const [results, setResults] = useState<Record<string, string>>({});
+  const [probing, setProbing] = useState(false);
 
+  // The Test button sends a real completion request, so it costs quota. The
+  // warning is shown before the click rather than reported after.
   const test = useCallback(async (id: string) => {
     setTesting(id);
     try {
@@ -236,7 +242,7 @@ function ProviderPanel({ providers, selected, onSelect, disabled, onChanged, onE
         ? `PASS · HTTP ${res.http} · ${res.durationMs}ms`
         : res.result === 'NOT_CONFIGURED'
           ? 'NOT CONFIGURED'
-          : `FAIL · ${res.kind ?? 'error'}${res.http ? ` · HTTP ${res.http}` : ''}`;
+          : `FAIL · ${res.classification ?? res.kind ?? 'error'}${res.http ? ` · HTTP ${res.http}` : ''}`;
       setResults((prev) => ({ ...prev, [id]: detail }));
     } catch (err) {
       onError(err instanceof Error ? err.message : String(err));
@@ -254,13 +260,45 @@ function ProviderPanel({ providers, selected, onSelect, disabled, onChanged, onE
     }
   }, [onChanged, onError]);
 
-  const options: ProviderSelection[] = ['auto', 'openrouter', 'gemini', 'groq'];
+  // The auto probe walks the whole failover chain, so the result is the real
+  // sequence of providers that were tried, in order.
+  const autoProbe = useCallback(async () => {
+    setProbing(true);
+    try {
+      const res = await api.autoProbeAi();
+      const trail = res.attempts.map((a) => `${a.provider}:${a.outcome}`).join(' -> ');
+      setResults((prev) => ({
+        ...prev,
+        auto: res.ok
+          ? `PASS · answered by ${res.answeredBy}${res.failoverFrom ? ` (failed over from ${res.failoverFrom})` : ''} · ${trail}`
+          : `FAIL · ${trail || 'no provider attempted'}`,
+      }));
+      onChanged();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setProbing(false);
+    }
+  }, [onChanged, onError]);
+
+  const options: ProviderSelection[] = ['auto', ...(providers?.priority ?? []) as ProviderId[]];
+
+  // States carry the observed facts; the summary list carries configuration.
+  const stateById = new Map((providers?.providerStates ?? []).map((s) => [s.id, s]));
+
+  const statusOf = (p: AiProvider): { label: string; tone: 'ok' | 'warn' | 'off' } => {
+    const st = stateById.get(p.id);
+    if (!p.configured) return { label: 'NOT CONFIGURED', tone: 'off' };
+    if (p.cooling) return { label: 'COOLING DOWN', tone: 'warn' };
+    if (st?.available) return { label: 'AVAILABLE', tone: 'ok' };
+    return { label: 'NOT TESTED', tone: 'warn' };
+  };
 
   return (
     <Card
       title="AI engine"
       subtitle="Keys stay on the server. AUTO fails over only on temporary provider limits."
-      actions={<StatePill value={providers?.auto.ready.length ? `READY ${providers.auto.ready.join(',')}` : 'NO PROVIDER READY'} />}
+      actions={<StatePill value={providers?.auto.ready.length ? `READY ${providers.auto.ready.length}` : 'NO PROVIDER READY'} />}
     >
       <div className="row" style={{ flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
         <label className="sr-only" htmlFor="ai-provider">AI provider</label>
@@ -268,23 +306,63 @@ function ProviderPanel({ providers, selected, onSelect, disabled, onChanged, onE
           id="ai-provider" className="select" value={selected} disabled={disabled}
           onChange={(e) => onSelect(e.target.value as ProviderSelection)}
         >
-          {options.map((o) => <option key={o} value={o}>{PROVIDER_LABEL[o] ?? o}</option>)}
+          {options.map((o) => <option key={o} value={o}>{PROVIDER_LABEL[o] ?? (providers?.providers.find((p) => p.id === o)?.label ?? o)}</option>)}
         </select>
+        <button
+          className="btn btn-ghost btn-sm"
+          disabled={disabled || probing}
+          onClick={() => void autoProbe()}
+          title="Runs one real request through AUTO and may consume quota on each provider tried."
+        >
+          {probing ? 'Probing' : 'Test AUTO'}
+        </button>
         {disabled && <span className="muted" style={{ fontSize: 12.5 }}>A run is active; provider is fixed for it.</span>}
       </div>
+
+      {providers && (
+        <p className="muted" style={{ fontSize: 12.5, marginBottom: 8 }}>
+          Would use now: <strong>{providers.current.label ?? 'none'}</strong>
+          {providers.current.model ? ` · ${providers.current.model}` : ''} — {providers.current.reason}
+        </p>
+      )}
 
       {!providers && <Empty>Provider status unavailable.</Empty>}
       {providers && (
         <ul className="step-list">
-          {providers.providers.map((p) => (
+          {providers.providers.map((p) => {
+            const st = stateById.get(p.id);
+            const s = statusOf(p);
+            return (
             <li key={p.id} className="step">
-              <span className={`dot ${p.configured ? (p.cooling ? 'warn' : 'ok') : 'off'}`} aria-hidden="true" />
+              <span className={`dot ${s.tone}`} aria-hidden="true" />
               <span>
                 {p.label}
-                <span className="muted" style={{ marginLeft: 6, fontSize: 12 }}>
-                  {p.configured ? (p.cooling ? 'cooling down' : 'configured') : 'NOT CONFIGURED'}
-                </span>
-                {results[p.id] && <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>{results[p.id]}</span>}
+                <span className="muted" style={{ marginLeft: 6, fontSize: 12 }}>{s.label}</span>
+                {p.cooling && st?.cooldownStrike ? (
+                  <span className="muted" style={{ marginLeft: 6, fontSize: 12 }}>· backoff x{st.cooldownStrike}</span>
+                ) : null}
+                {st && st.requestCount > 0 && (
+                  <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>
+                    {st.requestCount} req ({st.successCount} ok / {st.failureCount} failed)
+                  </span>
+                )}
+                {st && st.rateLimitRemainingRequests !== null && (
+                  <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>
+                    · {st.rateLimitRemainingRequests} req left
+                    {st.rateLimitResetAt ? ` (reset ${new Date(st.rateLimitResetAt).toLocaleTimeString()})` : ''}
+                  </span>
+                )}
+                {st?.lastError && (
+                  <span className="muted" style={{ display: 'block', fontSize: 11.5, marginTop: 2 }}>
+                    last error: {st.lastError}
+                  </span>
+                )}
+                {p.capabilities && !p.capabilities.agent && (
+                  <span className="muted" style={{ display: 'block', fontSize: 11.5, marginTop: 2 }}>
+                    {p.capabilities.agentNote ?? 'CHAT_ONLY'}
+                  </span>
+                )}
+                {results[p.id] && <span className="muted" style={{ display: 'block', fontSize: 12 }}>{results[p.id]}</span>}
               </span>
               <span className="row" style={{ marginLeft: 'auto', gap: 6 }}>
                 {p.cooling && (
@@ -294,13 +372,38 @@ function ProviderPanel({ providers, selected, onSelect, disabled, onChanged, onE
                   className="btn btn-ghost btn-sm"
                   disabled={!p.configured || testing === p.id}
                   onClick={() => void test(p.id)}
+                  title="This test uses one real API request and may consume your quota."
                 >
-                  {testing === p.id ? 'Testing' : 'Test'}
+                  {testing === p.id ? 'Testing' : 'Test API'}
                 </button>
               </span>
             </li>
-          ))}
+            );
+          })}
         </ul>
+      )}
+      {providers && (
+        <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+          Test API sends one real request and may consume your quota; Test AUTO may send one per
+          provider tried. Counts above are requests this server actually sent. Remaining quota is
+          shown only when a provider reported it; otherwise it stays unknown.
+        </p>
+      )}
+      {providers && providers.recentAttempts.length > 0 && (
+        <details style={{ marginTop: 8 }}>
+          <summary className="muted" style={{ fontSize: 12, cursor: 'pointer' }}>Recent provider attempts</summary>
+          <ul className="step-list" style={{ marginTop: 6 }}>
+            {providers.recentAttempts.slice(-10).reverse().map((a, i) => (
+              <li key={`${a.at}-${i}`} className="step">
+                <span className={`dot ${a.outcome === 'ok' ? 'ok' : a.outcome === 'fallback' ? 'warn' : 'off'}`} aria-hidden="true" />
+                <span className="muted" style={{ fontSize: 12 }}>
+                  {a.provider} · {a.outcome}{a.status ? ` · HTTP ${a.status}` : ''}
+                  {a.classification ? ` · ${a.classification}` : ''} · {new Date(a.at).toLocaleTimeString()}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </details>
       )}
     </Card>
   );

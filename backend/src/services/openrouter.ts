@@ -15,6 +15,7 @@ import {
   type ChatOptions,
   type ChatOutcome,
   type ChatResult,
+  type ProviderCapabilities,
   type ProviderSettings,
 } from './providerClient.ts';
 
@@ -32,6 +33,7 @@ export class OpenRouterService {
       'HTTP-Referer': config.openRouterReferer,
       'X-Title': config.openRouterTitle,
     },
+    capabilities: { agent: true, chat: true, streaming: true, jsonMode: true },
     quotaPatterns: [/free-models-per-day/i, /openrouter_free_tier_daily/i],
   }));
 
@@ -42,6 +44,11 @@ export class OpenRouterService {
   public status(): { configured: boolean; model: string; baseUrl: string } {
     const s = this.client.status();
     return { configured: s.configured, model: s.model, baseUrl: s.baseUrl };
+  }
+
+
+  public capabilities(): ProviderCapabilities {
+    return this.client.capabilities();
   }
 
   public listModels(): Promise<{ ok: boolean; models: string[]; error?: string }> {

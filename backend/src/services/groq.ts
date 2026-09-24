@@ -3,7 +3,8 @@
  * proxied through any other provider.
  */
 import { config } from '../config/index.ts';
-import { OpenAiCompatibleClient, type ProviderSettings } from './providerClient.ts';
+import { OpenAiCompatibleClient, type ProviderCapabilities,
+  type ProviderSettings } from './providerClient.ts';
 
 export class GroqService {
   private readonly client = new OpenAiCompatibleClient((): ProviderSettings => ({
@@ -13,6 +14,7 @@ export class GroqService {
     model: config.groqModel,
     timeoutMs: config.groqTimeoutMs,
     maxRetries: 1,
+    capabilities: { agent: true, chat: true, streaming: true, jsonMode: true },
     quotaPatterns: [/rate limit/i, /quota/i],
   }));
 
@@ -23,6 +25,11 @@ export class GroqService {
   public status(): { configured: boolean; model: string; baseUrl: string } {
     const s = this.client.status();
     return { configured: s.configured, model: s.model, baseUrl: s.baseUrl };
+  }
+
+
+  public capabilities(): ProviderCapabilities {
+    return this.client.capabilities();
   }
 
   public listModels(): Promise<{ ok: boolean; models: string[]; error?: string }> {

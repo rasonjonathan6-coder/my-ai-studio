@@ -20,11 +20,11 @@ inferred from intent. Every status is one of:
 | Area | Status | Evidence |
 | --- | --- | --- |
 | ENVIRONMENT | PASS | node 24.21.0, git 2.47.3, docker 29.8.1, python 3.13.15, adb 1.0.41; java 17 present only in the backend image, no JDK and no system gradle on the host (the Gradle 8.9 wrapper is used) |
-| FRONTEND | PASS | typecheck, lint, 13/13 tests, production build 357.33 kB JS / 106.35 kB gzip + 3 lazy chunks + 10.23 kB CSS; the app is served over the public work-host URL and its API proxy works from a mobile user-agent |
-| BACKEND | PASS | typecheck, lint, 58/58 tests (incl. OpenRouter tests against a real local HTTP server), real HTTP smoke 15/15 |
+| FRONTEND | PASS | typecheck, lint, 20/20 tests, production build 357.33 kB JS / 106.35 kB gzip + 3 lazy chunks + 10.23 kB CSS; the app is served over the public work-host URL and its API proxy works from a mobile user-agent |
+| BACKEND | PASS | typecheck, lint, 75/75 tests (incl. OpenRouter tests against a real local HTTP server), real HTTP smoke 15/15 |
 | DATABASE | PASS | PostgreSQL 16.15 reachable; migrations applied; auth and project rows persisted and read back |
 | OPENROUTER | PASS | live key used; HTTP 200 completion recorded; `/api/health` reports `configured`; key never echoed. As of the latest session the free-model daily quota is exhausted, so a fresh probe honestly returns `rate_limited · HTTP 429` |
-| MULTI-PROVIDER ROUTING | PARTIAL | OpenRouter, Gemini and Groq are implemented server-side and the test endpoint hits the real APIs; OpenRouter reports `rate_limited · HTTP 429`, Gemini and Groq report `NOT_CONFIGURED` (no server key). AUTO fails over only on temporary limits, never on a bad credential |
+| MULTI-PROVIDER ROUTING | PASS | three independent providers wired server-side (OpenRouter, Google Gemini, Groq), each with its own key and endpoint; all three report `configured`. A real AUTO agent run executed the full failover chain OpenRouter 429 -> Gemini 429 -> Groq (7 successful turns, files written, then Groq's 8000 tok/min cap). A pinned Groq run **succeeded** end to end and its `hello.txt` was verified on disk. `requestCounters` reports observed requests and `quotaRemaining` stays `unknown` |
 | AGENT LOOP | PASS | live run: reading -> editing -> testing -> building -> completed; code change and APK independently verified |
 | OPENHANDS | NOT AVAILABLE | no OpenHands agent-server endpoint reachable from this environment |
 | DOCKER | PASS | backend image built; container ran; full smoke suite executed inside it; sandbox runs as uid 1000, cannot reach `169.254.169.254`, and legitimate egress still works |
@@ -137,6 +137,49 @@ An `OPENROUTER_API_KEY` was supplied and the integration was exercised for real.
 - A direct call from the backend container returned HTTP 200 with a genuine
   completion, served by `nvidia/nemotron-3-super-120b-a12b:free`.
 - `GET /api/health` reports `openrouter: "configured"` and never echoes the key.
+
+### MULTI-PROVIDER ROUTING - PASS (three providers, verified with real requests)
+
+OpenRouter, Google Gemini and Groq are independent transports: each has its own
+key, its own base URL and its own model. No provider's traffic transits another.
+All three keys live in the server-side `.env` only, and every one of these
+observations came from a real HTTP request, not from a mock.
+
+- `GET /api/health` and `GET /api/ai/providers` report all three as `configured`
+  with the key value hidden.
+- Groq test endpoint: HTTP 200, reply `OK`, ~470 ms.
+- A real **AUTO** agent run on the `node-ts` template executed the whole failover
+  chain. The attempt trail recorded openrouter `429 rate_limited` -> gemini
+  `429 rate_limited` -> groq, which then served seven consecutive successful
+  turns before hitting Groq's per-minute token cap. The agent had, by then,
+  really written `src/math.ts` and `tests/math.test.ts` into the workspace; both
+  files were read back through the API.
+- A **pinned Groq** run then **succeeded**: `status: succeeded`, `phase: completed`,
+  `provider: groq`, `model: qwen/qwen3.8-27b`. The file it was asked to create
+  (`hello.txt`, content `hello`) was verified both through the file API and
+  directly on disk inside the container.
+
+Two findings were established by direct API calls during this work and are worth
+recording, because both look like application bugs until the provider is probed:
+
+1. **Groq rejects its own `gpt-oss` models for this agent.** `gpt-oss-120b` and
+   `gpt-oss-20b` ship a built-in `repo_browser` tool that fires on tool-shaped
+   prompts; the API returns HTTP 400 `tool_use_failed` ("Tool choice is none, but
+   model called a tool") no matter what `tool_choice`, `tools`, `reasoning_effort`
+   or `parallel_tool_calls` are set to. The agent drives its tools through a text
+   JSON protocol, and `qwen/qwen3.8-27b` follows it correctly, so that is now the
+   Groq default.
+2. **Gemini's OpenAI-compatible surface rejects two consecutive system messages**
+   with `MALFORMED_FUNCTION_CALL`. The loop sent a system prompt and a context
+   prompt as two separate `system` turns; they are now merged into one, which
+   every provider accepts. This fix could not be confirmed live because Gemini's
+   free tier was rate-limited (`429`) for the whole session - that verification
+   remains outstanding and is reported as such, not as a pass.
+
+`quotaRemaining` is deliberately reported as `unknown`. No provider API exposes a
+remaining-quota figure, so inventing one would be worse than reporting none. What
+the UI does show is `requestCounters`: the number of requests this server
+actually sent per provider today, counted where every attempt is recorded.
 
 ### AGENT LOOP — PASS (real work, not scripted)
 

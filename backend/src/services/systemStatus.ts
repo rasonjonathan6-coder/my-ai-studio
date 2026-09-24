@@ -10,7 +10,12 @@ import { checkDatabase } from '../db/pool.ts';
 import { aiRouter } from './aiProvider.ts';
 import { dockerAvailable, resolveBackend } from './commandRunner.ts';
 
-export type ProbeState = 'AVAILABLE' | 'NOT_AVAILABLE' | 'ERROR';
+/**
+ * A probe is a fact about the environment. NOT_TESTED is distinct from
+ * NOT_AVAILABLE: the first means it was never exercised, the second means it was
+ * and did not answer.
+ */
+export type ProbeState = 'AVAILABLE' | 'NOT_AVAILABLE' | 'NOT_TESTED' | 'ERROR';
 
 export interface Probe {
   name: string;
@@ -233,18 +238,34 @@ export async function getSystemStatus(): Promise<SystemStatus> {
 
   // One probe per AI provider. Configuration is reported separately from
   // reachability: a configured key is not proof the provider answers, so the
-  // detail says "configured", never "connected".
+  // detail says "configured", never "connected". A provider that a real request
+  // has succeeded against is AVAILABLE; one that only has a key is NOT_TESTED;
+  // an unconfigured or local provider with no URL is NOT_AVAILABLE.
+  const observed = new Map(aiRouter.providerStates().map((s) => [s.id, s]));
   const providerProbes: Probe[] = aiRouter.providers().map((p) => {
     const s = p.status();
+    const st = observed.get(p.id);
     const cooling = aiRouter.isCooling(p.id);
-    return s.configured
-      ? {
+    if (!s.configured) {
+      return { name: p.id, state: 'NOT_AVAILABLE' as const, version: s.model, detail: `${p.label} is not configured` };
+    }
+    if (cooling) {
+      return {
         name: p.id,
-        state: 'AVAILABLE',
+        state: 'ERROR' as const,
         version: s.model,
-        detail: cooling ? 'API key configured; in cooldown after a provider limit' : 'API key configured (value hidden)',
-      }
-      : { name: p.id, state: 'NOT_AVAILABLE', version: s.model, detail: `${p.label} API key not configured` };
+        detail: `configured; cooling down after ${st?.cooldownReason ?? 'a provider limit'}`,
+      };
+    }
+    if (st?.available) {
+      return { name: p.id, state: 'AVAILABLE' as const, version: st.lastStatusCode ? `${s.model} (HTTP ${st.lastStatusCode})` : s.model, detail: 'a real request succeeded against this provider' };
+    }
+    return {
+      name: p.id,
+      state: 'NOT_TESTED' as const,
+      version: s.model,
+      detail: st?.lastError ? `configured; last error: ${st.lastError}` : 'configured (value hidden); no request made yet',
+    };
   });
   // An emulator needs a device actually attached, not just the adb binary.
   // The check runs where commands execute, so sandbox adb is consulted when the
@@ -280,7 +301,7 @@ export async function getSystemStatus(): Promise<SystemStatus> {
     ],
     ai: {
       defaultProvider: config.aiDefaultProvider,
-      order: config.aiProviderOrder,
+      order: config.aiProviderPriority,
       cooldowns: aiRouter.cooldownState(),
     },
     executionBackend: backend,

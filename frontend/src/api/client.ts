@@ -1,10 +1,11 @@
 import type {
-  AgentRun, AiProviderTestResult, AiProvidersResponse, BuildResult, CommandResult, Conversation,
-  ExportResult, FileEntry, Message, PreviewResult, Project, SecurityScan, SystemStatus, User,
+  AgentRun, AiAutoProbeResponse, AiProviderProbeResult, AiProviderTestResult, AiProvidersResponse,
+  BuildResult, CommandResult, Conversation,
+  ExportResult, FileEntry, Message, PreviewResult, Project, ProviderSelection, SecurityScan, SystemStatus, User,
 } from './types.ts';
 
-/** Which provider the agent should use: 'auto' or a specific provider id. */
-export type ProviderSelection = 'auto' | 'openrouter' | 'gemini' | 'groq';
+/** Re-exported so callers have a single import site for the contract types. */
+export type { ProviderSelection } from './types.ts';
 
 /**
  * The API base URL. Only VITE_API_URL is read, and it must never contain a
@@ -113,6 +114,12 @@ export const api = {
     request<AiProviderTestResult>(`/api/ai/providers/${provider}/test`, { method: 'POST', ...json({}) }),
   resetAiProvider: (provider: string) =>
     request<{ provider: string; cooldownCleared: boolean }>(`/api/ai/providers/${provider}/reset`, { method: 'POST' }),
+  // Reachability check that spends no completion quota (lists models).
+  probeAiProvider: (provider: string) =>
+    request<AiProviderProbeResult>(`/api/ai/providers/${provider}/probe`, { method: 'POST', ...json({}) }),
+  // One real request through the AUTO path, to observe the failover chain.
+  autoProbeAi: () =>
+    request<AiAutoProbeResponse>('/api/ai/providers/auto/auto-probe', { method: 'POST', ...json({}) }),
 
   // tests / builds
   runTests: (id: string) => request<{ test: { status: string; framework: string | null; command: string | null; passed: number; failed: number; skipped: number; durationMs: number; log: string; error: string | null } }>(`/api/projects/${id}/test`, { method: 'POST' }),

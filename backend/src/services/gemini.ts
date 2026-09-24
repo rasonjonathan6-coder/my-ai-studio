@@ -5,7 +5,8 @@
  * through OpenRouter.
  */
 import { config } from '../config/index.ts';
-import { OpenAiCompatibleClient, type ProviderSettings } from './providerClient.ts';
+import { OpenAiCompatibleClient, type ProviderCapabilities,
+  type ProviderSettings } from './providerClient.ts';
 
 export class GeminiService {
   private readonly client = new OpenAiCompatibleClient((): ProviderSettings => ({
@@ -16,6 +17,7 @@ export class GeminiService {
     timeoutMs: config.geminiTimeoutMs,
     // Gemini signals quota with RESOURCE_EXHAUSTED and demand spikes with 503.
     maxRetries: 1,
+    capabilities: { agent: true, chat: true, streaming: true, jsonMode: true },
     quotaPatterns: [/RESOURCE_EXHAUSTED/i, /quota/i],
   }));
 
@@ -26,6 +28,11 @@ export class GeminiService {
   public status(): { configured: boolean; model: string; baseUrl: string } {
     const s = this.client.status();
     return { configured: s.configured, model: s.model, baseUrl: s.baseUrl };
+  }
+
+
+  public capabilities(): ProviderCapabilities {
+    return this.client.capabilities();
   }
 
   public listModels(): Promise<{ ok: boolean; models: string[]; error?: string }> {

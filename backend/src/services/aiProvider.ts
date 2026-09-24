@@ -15,48 +15,109 @@ import { logger } from '../lib/logger.ts';
 import { gemini } from './gemini.ts';
 import { groq } from './groq.ts';
 import { openRouter } from './openrouter.ts';
-import type { ChatFailure, ChatOptions, ChatOutcome } from './providerClient.ts';
+import {
+  cerebras, chutes, cloudflare, huggingface, mistral, nvidia, ollama, sambanova, vllm,
+  type ProviderService,
+} from './providers.ts';
+import type { ChatFailure, ChatOptions, ChatOutcome, ProviderCapabilities } from './providerClient.ts';
 
-export type ProviderId = 'openrouter' | 'gemini' | 'groq';
+/**
+ * Every provider the gateway knows about, in the order they are declared here.
+ * Declaration order is only the fallback for ids missing from the configured
+ * priority list; it is not the effective order of use.
+ */
+export const PROVIDER_IDS = [
+  'openrouter', 'gemini', 'groq', 'cerebras', 'mistral', 'cloudflare',
+  'nvidia', 'huggingface', 'chutes', 'sambanova', 'ollama', 'vllm',
+] as const;
+
+export type ProviderId = typeof PROVIDER_IDS[number];
 export type ProviderSelection = 'auto' | ProviderId;
 
 export interface ProviderAdapter {
   id: ProviderId;
   label: string;
+  /** True for a locally hosted runtime, shown differently in the UI. */
+  local: boolean;
   isConfigured(): boolean;
   status(): { configured: boolean; model: string; baseUrl: string };
+  capabilities(): ProviderCapabilities;
   listModels(): Promise<{ ok: boolean; models: string[]; error?: string }>;
   chat(options: ChatOptions): Promise<ChatOutcome>;
 }
 
-function wrap(id: ProviderId, label: string, svc: {
-  isConfigured(): boolean;
-  status(): { configured: boolean; model: string; baseUrl: string };
-  listModels(): Promise<{ ok: boolean; models: string[]; error?: string }>;
-  chat(options: ChatOptions): Promise<ChatOutcome>;
-}): ProviderAdapter {
+const SERVICES: Record<ProviderId, ProviderService> = {
+  openrouter: openRouter,
+  gemini,
+  groq,
+  cerebras,
+  mistral,
+  cloudflare,
+  nvidia,
+  huggingface,
+  chutes,
+  sambanova,
+  ollama,
+  vllm,
+};
+
+const LABELS: Record<ProviderId, string> = {
+  openrouter: 'OpenRouter',
+  gemini: 'Google Gemini',
+  groq: 'Groq',
+  cerebras: 'Cerebras',
+  mistral: 'Mistral',
+  cloudflare: 'Cloudflare Workers AI',
+  nvidia: 'NVIDIA',
+  huggingface: 'Hugging Face',
+  chutes: 'Chutes',
+  sambanova: 'SambaNova',
+  ollama: 'Ollama (local)',
+  vllm: 'vLLM (local)',
+};
+
+const LOCAL: ReadonlySet<ProviderId> = new Set<ProviderId>(['ollama', 'vllm']);
+
+function wrap(id: ProviderId): ProviderAdapter {
+  const svc = SERVICES[id];
   // Methods live on the class prototype, so they are bound explicitly rather
   // than spread: a spread would produce an object with no callable methods.
   return {
     id,
-    label,
+    label: LABELS[id],
+    local: LOCAL.has(id),
     isConfigured: () => svc.isConfigured(),
     status: () => svc.status(),
+    capabilities: () => svc.capabilities(),
     listModels: () => svc.listModels(),
     chat: (options) => svc.chat(options),
   };
 }
 
-const adapters: Record<ProviderId, ProviderAdapter> = {
-  openrouter: wrap('openrouter', 'OpenRouter', openRouter),
-  gemini: wrap('gemini', 'Google Gemini', gemini),
-  groq: wrap('groq', 'Groq', groq),
-};
+const adapters = Object.fromEntries(
+  PROVIDER_IDS.map((id) => [id, wrap(id)]),
+) as Record<ProviderId, ProviderAdapter>;
 
-export const PROVIDER_IDS: ProviderId[] = ['openrouter', 'gemini', 'groq'];
+/**
+ * Builds an adapter from any service. Exported so tests can register a mock
+ * service and exercise the real routing, cooldown and classification code
+ * without sending a request to a real provider.
+ */
+export function makeAdapter(id: ProviderId, svc: ProviderService): ProviderAdapter {
+  return {
+    id,
+    label: LABELS[id],
+    local: LOCAL.has(id),
+    isConfigured: () => svc.isConfigured(),
+    status: () => svc.status(),
+    capabilities: () => svc.capabilities(),
+    listModels: () => svc.listModels(),
+    chat: (options) => svc.chat(options),
+  };
+}
 
 export function isProviderId(value: unknown): value is ProviderId {
-  return typeof value === 'string' && (PROVIDER_IDS as string[]).includes(value);
+  return typeof value === 'string' && (PROVIDER_IDS as readonly string[]).includes(value);
 }
 
 export function isProviderSelection(value: unknown): value is ProviderSelection {
@@ -66,6 +127,44 @@ export function isProviderSelection(value: unknown): value is ProviderSelection 
 interface CooldownEntry {
   until: number;
   reason: string;
+  /** How many consecutive limit hits led here; drives the escalating backoff. */
+  strike: number;
+}
+
+/**
+ * The live state the gateway holds for a provider. Everything here comes from
+ * something actually observed: a real request outcome, a real response header,
+ * or the configuration. Nothing is estimated, and every unknown is null.
+ */
+export interface ProviderState {
+  id: ProviderId;
+  label: string;
+  local: boolean;
+  configured: boolean;
+  /** True once a real request has succeeded; configuration alone proves nothing. */
+  available: boolean;
+  lastStatusCode: number | null;
+  lastError: string | null;
+  lastErrorAt: string | null;
+  cooldownUntil: string | null;
+  cooldownReason: string | null;
+  cooldownStrike: number;
+  requestCount: number;
+  successCount: number;
+  failureCount: number;
+  /** Rate-limit headers the provider itself returned, or null when never seen. */
+  rateLimitRemainingRequests: number | null;
+  rateLimitRemainingTokens: number | null;
+  rateLimitResetAt: string | null;
+  capabilities: ProviderCapabilities;
+}
+
+/** Requests the router itself observed for a provider on a given day. */
+export interface RequestCounter {
+  date: string;
+  attempts: number;
+  ok: number;
+  failed: number;
 }
 
 export interface AttemptRecord {
@@ -75,6 +174,7 @@ export interface AttemptRecord {
   outcome: 'ok' | 'fallback' | 'error';
   status?: number;
   kind?: ChatFailure['kind'];
+  classification?: ChatFailure['classification'];
   message?: string;
   at: string;
 }
@@ -111,6 +211,10 @@ export type RoutedOutcome = RoutedResult | RoutedFailure;
  */
 function isTransientFailure(failure: ChatFailure): boolean {
   if (failure.kind === 'not_configured') return false;
+  // An auth/permission/bad-request classification is configuration, not load.
+  if (failure.classification === 'AUTHENTICATION' || failure.classification === 'PERMISSION' || failure.classification === 'BAD_REQUEST') {
+    return false;
+  }
   if (failure.kind === 'http_error' && failure.status !== undefined) {
     // 400/401/403 are request or credential problems, not availability.
     return failure.status >= 500 || failure.status === 429;
@@ -122,20 +226,88 @@ export class AiProviderRouter {
   private readonly cooldowns = new Map<ProviderId, CooldownEntry>();
   private readonly history: AttemptRecord[] = [];
   private readonly maxHistory = 100;
+  private readonly counters = new Map<ProviderId, RequestCounter>();
+  /**
+   * Adapter table. Production uses the real ones; a test passes a partial
+   * override so the routing and cooldown logic runs against mock services.
+   */
+  private readonly table: Record<ProviderId, ProviderAdapter>;
+
+  public constructor(overrides: Partial<Record<ProviderId, ProviderAdapter>> = {}) {
+    this.table = { ...adapters, ...overrides };
+  }
+  /** Per-provider observations that outlive a single day: last status, headers. */
+  private readonly observed = new Map<ProviderId, {
+    available: boolean;
+    lastStatusCode: number | null;
+    lastError: string | null;
+    lastErrorAt: string | null;
+    rateLimitRemainingRequests: number | null;
+    rateLimitRemainingTokens: number | null;
+    rateLimitResetAt: string | null;
+  }>();
+
+  private today(): string {
+    return new Date().toISOString().slice(0, 10);
+  }
+
+  private observation(id: ProviderId) {
+    const cur = this.observed.get(id);
+    if (cur) return cur;
+    const fresh = {
+      available: false,
+      lastStatusCode: null,
+      lastError: null,
+      lastErrorAt: null,
+      rateLimitRemainingRequests: null,
+      rateLimitRemainingTokens: null,
+      rateLimitResetAt: null,
+    };
+    this.observed.set(id, fresh);
+    return fresh;
+  }
+
+  private countAttempt(id: ProviderId, ok: boolean): void {
+    const date = this.today();
+    const cur = this.counters.get(id);
+    if (!cur || cur.date !== date) {
+      this.counters.set(id, { date, attempts: 1, ok: ok ? 1 : 0, failed: ok ? 0 : 1 });
+      return;
+    }
+    cur.attempts += 1;
+    if (ok) cur.ok += 1;
+    else cur.failed += 1;
+  }
+
+  /**
+   * Requests this process actually sent per provider today. The provider APIs
+   * do not expose a remaining-quota figure, so callers must present these as
+   * observed counts and label the remaining quota as unknown.
+   */
+  public requestCounters(): Record<ProviderId, RequestCounter> {
+    const date = this.today();
+    const out = {} as Record<ProviderId, RequestCounter>;
+    for (const id of PROVIDER_IDS) {
+      const cur = this.counters.get(id);
+      out[id] = cur && cur.date === date ? { ...cur } : { date, attempts: 0, ok: 0, failed: 0 };
+    }
+    return out;
+  }
 
   public providers(): ProviderAdapter[] {
-    return PROVIDER_IDS.map((id) => adapters[id]);
+    return PROVIDER_IDS.map((id) => this.table[id]);
   }
 
   public adapter(id: ProviderId): ProviderAdapter {
-    return adapters[id];
+    return this.table[id];
   }
 
   public isCooling(id: ProviderId, now = Date.now()): boolean {
     const entry = this.cooldowns.get(id);
     if (!entry) return false;
     if (entry.until <= now) {
-      this.cooldowns.delete(id);
+      // The entry is kept (not deleted) so the strike count survives, which is
+      // what makes a repeated offender back off further next time.
       return false;
     }
     return true;
@@ -162,12 +334,89 @@ export class AiProviderRouter {
   }
 
   /**
-   * Records a failure observed outside a routed call, such as the provider test
-   * endpoint. A hard quota must land in the same cooldown the router uses, or a
-   * probe would report an exhausted provider while AUTO kept sending runs to it.
+   * Full per-provider state for the UI. Configuration and observed counters come
+   * from this process; anything the provider never told us stays null.
    */
+  public providerStates(): ProviderState[] {
+    const cooldowns = this.cooldownState();
+    const counters = this.requestCounters();
+    return PROVIDER_IDS.map((id) => {
+      const adapter = this.table[id];
+      const status = adapter.status();
+      const obs = this.observation(id);
+      const count = counters[id];
+      const entry = this.cooldowns.get(id);
+      return {
+        id,
+        label: adapter.label,
+        local: adapter.local,
+        configured: status.configured,
+        available: obs.available,
+        lastStatusCode: obs.lastStatusCode,
+        lastError: obs.lastError,
+        lastErrorAt: obs.lastErrorAt,
+        cooldownUntil: cooldowns[id].until,
+        cooldownReason: cooldowns[id].reason,
+        cooldownStrike: entry ? entry.strike : 0,
+        requestCount: count.attempts,
+        successCount: count.ok,
+        failureCount: count.failed,
+        rateLimitRemainingRequests: obs.rateLimitRemainingRequests,
+        rateLimitRemainingTokens: obs.rateLimitRemainingTokens,
+        rateLimitResetAt: obs.rateLimitResetAt,
+        capabilities: adapter.capabilities(),
+      };
+    });
+  }
+
+  /**
+   * Records a real success, including the rate-limit headers the provider sent.
+   * `available` flips to true only here: a key being present is not proof that
+   * the provider answers.
+   */
+  private noteSuccess(id: ProviderId, result: Extract<ChatOutcome, { ok: true }>): void {
+    const obs = this.observation(id);
+    obs.available = true;
+    obs.lastStatusCode = 200;
+    obs.lastError = null;
+    obs.lastErrorAt = null;
+    // Recovery clears the backoff ladder so the next isolated limit starts over.
+    this.cooldowns.delete(id);
+    const rl = result.rateLimit;
+    if (rl) {
+      if (rl.remainingRequests !== null) obs.rateLimitRemainingRequests = rl.remainingRequests;
+      if (rl.remainingTokens !== null) obs.rateLimitRemainingTokens = rl.remainingTokens;
+      const reset = rl.resetRequestsAt ?? rl.resetTokensAt ?? rl.retryAfterAt;
+      if (reset) obs.rateLimitResetAt = reset;
+    }
+  }
+
+  /** Records a real failure. The message is already redacted by the client. */
+  private noteObservedFailure(id: ProviderId, failure: ChatFailure): void {
+    const obs = this.observation(id);
+    obs.lastStatusCode = failure.status ?? null;
+    obs.lastError = `${failure.classification ?? failure.kind}: ${failure.message}`.slice(0, 500);
+    obs.lastErrorAt = new Date().toISOString();
+  }
+
+  /**
+   * Records a success observed outside a routed call, such as the provider test
+   * endpoint. It is counted like any other real request, so the counters stay a
+   * truthful tally of what this process sent.
+   */
+  public noteTest(id: ProviderId, result: Extract<ChatOutcome, { ok: true }>): void {
+    this.countAttempt(id, true);
+    this.noteSuccess(id, result);
+  }
+
+  /** Records a failure observed outside a routed call, such as the test endpoint. */
   public noteFailure(id: ProviderId, failure: ChatFailure): void {
+    if (failure.kind !== 'not_configured') this.countAttempt(id, false);
+    this.noteObservedFailure(id, failure);
     if (failure.kind === 'not_configured') return;
+    // Only a limit or an outage should remove a provider from rotation. A bad
+    // key is a configuration fault the operator must see, not a busy provider.
+    if (!isTransientFailure(failure)) return;
     this.enterCooldown(id, failure);
   }
 
@@ -178,7 +427,7 @@ export class AiProviderRouter {
     const unconfigured: ProviderId[] = [];
     const order = this.normalizedOrder();
     for (const id of order) {
-      if (!adapters[id].isConfigured()) unconfigured.push(id);
+      if (!this.table[id].isConfigured()) unconfigured.push(id);
       else if (this.isCooling(id, now)) cooling.push(id);
       else ready.push(id);
     }
@@ -189,7 +438,7 @@ export class AiProviderRouter {
   private normalizedOrder(): ProviderId[] {
     const seen = new Set<ProviderId>();
     const order: ProviderId[] = [];
-    for (const raw of config.aiProviderOrder) {
+    for (const raw of config.aiProviderPriority) {
       if (isProviderId(raw) && !seen.has(raw)) {
         seen.add(raw);
         order.push(raw);
@@ -218,7 +467,7 @@ export class AiProviderRouter {
     const attempts: AttemptRecord[] = [];
 
     if (selection !== 'auto') {
-      const adapter = adapters[selection];
+      const adapter = this.table[selection];
       if (!adapter.isConfigured()) {
         return {
           ok: false,
@@ -243,6 +492,9 @@ export class AiProviderRouter {
           failoverFrom: null,
         };
       }
+      // A pinned failure is still a fact about the provider: recording it keeps
+      // AUTO from sending the next run at a provider just proven unavailable.
+      if (isTransientFailure(outcome)) this.enterCooldown(adapter.id, outcome);
       return {
         ok: false,
         provider: adapter.id,
@@ -271,7 +523,7 @@ export class AiProviderRouter {
     let lastFailure: RoutedFailure | null = null;
 
     for (const id of ready) {
-      const adapter = adapters[id];
+      const adapter = this.table[id];
       firstTried ??= id;
       const outcome = await adapter.chat(options);
       const record = this.record(attempts, adapter, outcome);
@@ -313,11 +565,20 @@ export class AiProviderRouter {
   }
 
   private enterCooldown(id: ProviderId, failure: ChatFailure): void {
-    // Honour a provider's own Retry-After when it gives one, otherwise use the
-    // configured cooldown. A hard quota waits for the configured cooldown too,
-    // since the exact reset instant is not always exposed.
-    const ms = Math.max(config.aiProviderCooldownMs, failure.retryAfterMs ?? 0);
-    this.cooldowns.set(id, { until: Date.now() + ms, reason: `${failure.kind}: ${failure.message}`.slice(0, 300) });
+    // Strikes escalate the wait so a provider that keeps refusing is not
+    // re-tried at the same cadence forever: 30s -> 1m -> 5m -> 15m, capped.
+    // A success resets the ladder, so a provider that recovered is trusted.
+    const strike = (this.cooldowns.get(id)?.strike ?? 0) + 1;
+    const ladder = [config.aiProviderCooldownMs, 60_000, 5 * 60_000, config.aiProviderCooldownMaxMs];
+    const base = ladder[Math.min(strike - 1, ladder.length - 1)];
+    // A provider's own Retry-After always wins over the ladder, and a hard
+    // quota's reset instant is honoured even when it is far away.
+    const ms = Math.max(base, failure.retryAfterMs ?? 0);
+    this.cooldowns.set(id, {
+      until: Date.now() + ms,
+      reason: `${failure.classification ?? failure.kind}: ${failure.message}`.slice(0, 300),
+      strike,
+    });
   }
 
   private record(attempts: AttemptRecord[], adapter: ProviderAdapter, outcome: ChatOutcome): AttemptRecord {
@@ -329,10 +590,14 @@ export class AiProviderRouter {
       outcome: outcome.ok ? 'ok' : isTransientFailure(outcome) ? 'fallback' : 'error',
       status: outcome.ok ? 200 : outcome.status,
       kind: outcome.ok ? undefined : outcome.kind,
+      classification: outcome.ok ? undefined : outcome.classification,
       message: outcome.ok ? undefined : outcome.message,
       at: new Date().toISOString(),
     };
     attempts.push(record);
+    this.countAttempt(adapter.id, outcome.ok);
+    if (outcome.ok) this.noteSuccess(adapter.id, outcome);
+    else this.noteObservedFailure(adapter.id, outcome);
     this.history.push(record);
     if (this.history.length > this.maxHistory) this.history.splice(0, this.history.length - this.maxHistory);
     return record;

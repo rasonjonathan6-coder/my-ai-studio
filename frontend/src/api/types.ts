@@ -75,9 +75,24 @@ export interface AgentRun {
   finished_at: string | null;
 }
 
+export type ProviderId =
+  | 'openrouter' | 'gemini' | 'groq' | 'cerebras' | 'mistral' | 'cloudflare'
+  | 'nvidia' | 'huggingface' | 'chutes' | 'sambanova' | 'ollama' | 'vllm';
+
+export type ProviderSelection = 'auto' | ProviderId;
+
+export interface ProviderCapabilities {
+  agent: boolean;
+  chat: boolean;
+  streaming: boolean;
+  jsonMode: boolean;
+  agentNote?: string;
+}
+
 export interface AiProvider {
-  id: 'openrouter' | 'gemini' | 'groq';
+  id: ProviderId;
   label: string;
+  local: boolean;
   configured: boolean;
   status: 'CONFIGURED' | 'NOT_CONFIGURED';
   connection: 'NOT_TESTED' | 'PASS' | 'FAIL';
@@ -86,18 +101,63 @@ export interface AiProvider {
   cooling: boolean;
   cooldownUntil: string | null;
   cooldownReason: string | null;
+  capabilities: ProviderCapabilities;
+}
+
+/** Live per-provider state. Unknown values are null, never guessed. */
+export interface ProviderState {
+  id: ProviderId;
+  label: string;
+  local: boolean;
+  configured: boolean;
+  available: boolean;
+  lastStatusCode: number | null;
+  lastError: string | null;
+  lastErrorAt: string | null;
+  cooldownUntil: string | null;
+  cooldownReason: string | null;
+  cooldownStrike: number;
+  requestCount: number;
+  successCount: number;
+  failureCount: number;
+  rateLimitRemainingRequests: number | null;
+  rateLimitRemainingTokens: number | null;
+  rateLimitResetAt: string | null;
+  capabilities: ProviderCapabilities;
+}
+
+export interface AiAttempt {
+  provider: ProviderId;
+  model: string;
+  endpoint: string;
+  outcome: 'ok' | 'fallback' | 'error';
+  status?: number;
+  kind?: string;
+  classification?: string;
+  message?: string;
+  at: string;
+}
+
+export interface AiProviderCurrent {
+  provider: ProviderId | null;
+  label: string | null;
+  model: string | null;
+  reason: string;
 }
 
 export interface AiProvidersResponse {
   defaultProvider: string;
   order: string[];
+  priority: string[];
   cooldownMs: number;
   providers: AiProvider[];
+  providerStates: ProviderState[];
+  current: AiProviderCurrent;
   auto: { ready: string[]; cooling: string[]; unconfigured: string[] };
-  recentAttempts: Array<{
-    provider: string; model: string; outcome: 'ok' | 'fallback' | 'error';
-    status?: number; kind?: string; message?: string; at: string;
-  }>;
+  recentAttempts: AiAttempt[];
+  requestCounters: Record<string, { date: string; attempts: number; ok: number; failed: number }>;
+  /** Always 'unknown': no provider API exposes a remaining-quota figure. */
+  quotaRemaining: 'unknown';
 }
 
 export interface AiProviderTestResult {
@@ -108,9 +168,33 @@ export interface AiProviderTestResult {
   endpoint: string;
   http?: number | null;
   kind?: string;
+  classification?: string | null;
+  quotaExhausted?: boolean;
   durationMs?: number;
+  quotaCost?: string;
   message?: string;
   reply?: string;
+}
+
+export interface AiProviderProbeResult {
+  provider: string;
+  label: string;
+  result: 'REACHABLE' | 'FAIL' | 'NOT_CONFIGURED';
+  endpoint: string;
+  quotaCost: string;
+  models?: string[];
+  modelCount?: number;
+  durationMs?: number;
+  message?: string | null;
+}
+
+export interface AiAutoProbeResponse {
+  ok: boolean;
+  answeredBy: string | null;
+  failoverFrom: string | null;
+  attempts: AiAttempt[];
+  quotaCost: string;
+  message: string | null;
 }
 
 export interface ApkInspection {
@@ -164,7 +248,7 @@ export interface BuildResult {
 
 export interface SystemProbe {
   name: string;
-  state: 'AVAILABLE' | 'NOT_AVAILABLE' | 'ERROR' | 'CONFIGURED' | 'NOT_CONFIGURED';
+  state: 'AVAILABLE' | 'NOT_AVAILABLE' | 'NOT_TESTED' | 'ERROR' | 'CONFIGURED' | 'NOT_CONFIGURED';
   detail: string | null;
   version: string | null;
 }

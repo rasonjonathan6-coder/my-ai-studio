@@ -75,7 +75,7 @@ before(async () => {
   config.geminiApiKey = 'test-key-gemini';
   config.groqApiKey = 'test-key-groq';
   config.openRouterMaxRetries = 0;
-  config.aiProviderOrder = ['openrouter', 'gemini', 'groq'];
+  config.aiProviderPriority = ['openrouter', 'gemini', 'groq'];
   config.aiProviderCooldownMs = 60_000;
 });
 
@@ -201,4 +201,28 @@ test('no key material is ever placed in an attempt record', async () => {
   for (const secret of [config.openRouterApiKey, config.geminiApiKey, config.groqApiKey]) {
     assert.equal(serialized.includes(secret), false, 'a key value must never appear in attempt metadata');
   }
+});
+
+test('request counters tally observed attempts per provider, not invented quotas', async () => {
+  orP.set(failure(429, JSON.stringify({ error: { message: 'quota exceeded' } })));
+  await router.chat('auto', call);
+
+  const counters = router.requestCounters();
+  // OpenRouter was attempted and refused; Gemini answered. One real request each.
+  assert.equal(counters.openrouter.attempts, 1);
+  assert.equal(counters.openrouter.failed, 1);
+  assert.equal(counters.openrouter.ok, 0);
+  assert.equal(counters.gemini.attempts, 1);
+  assert.equal(counters.gemini.ok, 1);
+  // Groq was never contacted, so its count stays at zero.
+  assert.equal(counters.groq.attempts, 0);
+  assert.equal(groqP.count(), 0);
+});
+
+test('a pinned provider still counts its own attempt', async () => {
+  await router.chat('groq', call);
+  const counters = router.requestCounters();
+  assert.equal(counters.groq.attempts, 1);
+  assert.equal(counters.openrouter.attempts, 0);
+  assert.equal(counters.gemini.attempts, 0);
 });

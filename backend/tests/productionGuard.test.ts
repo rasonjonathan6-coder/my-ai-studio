@@ -15,9 +15,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 
 const BACKEND = new URL('..', import.meta.url).pathname;
 const STRONG_SECRET = 'a'.repeat(48);
+
+/**
+ * `npm test` does not build first, and CI runs the suite before `npm run build`,
+ * so `dist/server.js` is usually absent. The source entry is written with
+ * explicit `.ts` import specifiers and runs directly under type stripping, so
+ * fall back to it rather than depending on a build having happened.
+ */
+function resolveEntry(): { file: string; execArgv: string[] } {
+  if (existsSync(path.join(BACKEND, 'dist', 'server.js'))) {
+    return { file: 'dist/server.js', execArgv: [] };
+  }
+  return { file: 'src/server.ts', execArgv: ['--experimental-strip-types'] };
+}
 
 /**
  * Boots the compiled server and resolves once it either refuses to start or
@@ -26,7 +41,8 @@ const STRONG_SECRET = 'a'.repeat(48);
  */
 function boot(env: Record<string, string>): Promise<{ refused: boolean; output: string }> {
   return new Promise((resolve) => {
-    const child = spawn('node', ['dist/server.js'], {
+    const entry = resolveEntry();
+    const child = spawn('node', [...entry.execArgv, entry.file], {
       cwd: BACKEND,
       env: {
         ...process.env,

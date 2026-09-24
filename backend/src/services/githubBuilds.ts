@@ -17,7 +17,7 @@ import { config } from '../config/index.ts';
 import { logger } from '../lib/logger.ts';
 import { sha256Hex } from '../lib/hash.ts';
 import { query } from '../db/pool.ts';
-import { validateApkBuffer } from '../lib/apkZip.ts';
+import { validateApkBuffer, type ApkValidation } from '../lib/apkZip.ts';
 import {
   credentialKind,
   dispatchWorkflow,
@@ -27,6 +27,7 @@ import {
   getWorkflowRun,
   listWorkflowRuns,
   cancelWorkflowRun,
+  type RunArtifact,
   type RunSnapshot,
 } from './githubActions.ts';
 import { jobQueue } from './jobQueue.ts';
@@ -327,35 +328,76 @@ async function pollRun(
  * artifact is recorded as a failure, because the APK is the point of the run.
  */
 async function collectArtifact(runRowId: string, projectId: string, repo: string, run: RunSnapshot): Promise<void> {
-  const artifact = run.artifacts.find((a) => !a.expired && a.sizeInBytes > 0);
-  if (!artifact) {
+  const candidates = run.artifacts.filter((a) => !a.expired && a.sizeInBytes > 0);
+  if (candidates.length === 0) {
     await finish(runRowId, projectId, 'failed', run.conclusion, 'run succeeded but no artifact was uploaded', true);
     return;
   }
-  const fetched = await fetchArtifactBytes(repo, artifact.id);
-  if (!fetched.ok || !fetched.bytes) {
+
+  const selected = await selectApkArtifact(candidates, (id) => fetchArtifactBytes(repo, id));
+  if (!selected.ok) {
     await finish(runRowId, projectId, 'failed', run.conclusion,
-      `artifact download failed: ${fetched.error ?? 'unknown error'}`, true);
-    return;
-  }
-  const apk = extractApkFromArtifact(fetched.bytes);
-  if (!apk.ok || !apk.bytes) {
-    await finish(runRowId, projectId, 'failed', run.conclusion,
-      `artifact contained no usable APK: ${apk.error ?? 'unknown'}`, true);
-    return;
-  }
-  const validation = validateApkBuffer(apk.bytes);
-  if (!validation.valid) {
-    await finish(runRowId, projectId, 'failed', run.conclusion,
-      `artifact APK failed validation: ${validation.error ?? 'invalid'}`, true);
+      `no artifact in this run contained a usable APK (${selected.problems.join('; ')})`, true);
     return;
   }
 
-  const digest = sha256Hex(apk.bytes);
+  await storeApk(runRowId, projectId, run, selected.artifact!, selected.bytes!,
+    selected.fileName ?? null, selected.validation!);
+}
+
+/**
+ * Picks the first candidate artifact that actually holds a usable APK.
+ *
+ * A run usually uploads more than one artifact (the APK, test reports, ...), and
+ * GitHub returns them in no guaranteed order: the APK came first in one observed
+ * run and second in the next. Selecting by position therefore produced different
+ * results from identical workflows. Every candidate is inspected instead, so
+ * neither ordering nor artifact naming can change the outcome.
+ */
+export async function selectApkArtifact(
+  candidates: RunArtifact[],
+  fetchBytes: (artifactId: number) => Promise<{ ok: boolean; bytes: Buffer | null; error?: string }>,
+): Promise<{
+  ok: boolean;
+  artifact?: RunArtifact;
+  bytes?: Buffer;
+  fileName?: string | null;
+  validation?: ApkValidation;
+  problems: string[];
+}> {
+  const problems: string[] = [];
+  for (const artifact of candidates) {
+    const fetched = await fetchBytes(artifact.id);
+    if (!fetched.ok || !fetched.bytes) {
+      problems.push(`${artifact.name}: download failed (${fetched.error ?? 'unknown error'})`);
+      continue;
+    }
+    const apk = extractApkFromArtifact(fetched.bytes);
+    if (!apk.ok || !apk.bytes) {
+      problems.push(`${artifact.name}: ${apk.error ?? 'no usable APK'}`);
+      continue;
+    }
+    const validation = validateApkBuffer(apk.bytes);
+    if (!validation.valid) {
+      problems.push(`${artifact.name}: invalid APK (${validation.error ?? 'invalid'})`);
+      continue;
+    }
+    return { ok: true, artifact, bytes: apk.bytes, fileName: apk.fileName, validation, problems };
+  }
+  return { ok: false, problems };
+}
+
+/** Persists a validated APK and records the run as successful. */
+async function storeApk(
+  runRowId: string, projectId: string, run: RunSnapshot,
+  artifact: RunArtifact, bytes: Buffer, apkFileName: string | null,
+  validation: ApkValidation,
+): Promise<void> {
+  const digest = sha256Hex(bytes);
   const dir = githubStorageDir(runRowId);
   await fs.mkdir(dir, { recursive: true });
-  const fileName = apk.fileName ?? 'app-debug.apk';
-  await fs.writeFile(path.join(dir, fileName), apk.bytes);
+  const fileName = apkFileName ?? 'app-debug.apk';
+  await fs.writeFile(path.join(dir, fileName), bytes);
 
   await query(
     `UPDATE github_runs SET status = 'success', conclusion = $2, apk_name = $3, apk_size_bytes = $4,
@@ -363,12 +405,12 @@ async function collectArtifact(runRowId: string, projectId: string, repo: string
        apk_valid = true, updated_at = now(), finished_at = now()
      WHERE id = $1`,
     [
-      runRowId, run.conclusion, fileName, apk.bytes.length, digest, artifact.id,
+      runRowId, run.conclusion, fileName, bytes.length, digest, artifact.id,
       validation.packageName, validation.versionName, validation.versionCode,
     ],
   );
   logEvent(projectId, 'build_log', 'info',
-    `GitHub Actions build succeeded · ${fileName} · ${apk.bytes.length} bytes · sha256 ${digest.slice(0, 16)}…`);
+    `GitHub Actions build succeeded · ${fileName} · ${bytes.length} bytes · sha256 ${digest.slice(0, 16)}…`);
 }
 
 /** Directory holding APKs fetched from GitHub, one per tracked build. */

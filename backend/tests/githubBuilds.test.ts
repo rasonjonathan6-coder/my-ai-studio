@@ -7,7 +7,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { config } from '../src/config/index.ts';
-import { deriveStatus, isTerminal } from '../src/services/githubBuilds.ts';
+import { deriveStatus, isTerminal, selectApkArtifact } from '../src/services/githubBuilds.ts';
 import {
   credentialKind, dispatchWorkflow, getGithubStatus, getRepoBranchHead, createBlobs, createTree, createCommit, updateRef,
   extractApkFromArtifact, extractRunLogText,
@@ -617,3 +617,45 @@ function makeRun(status: string, conclusion: string | null) {
     artifacts: [],
   };
 }
+
+// ------------------------------------------------------------ CASE 6-1 / 6-2
+/**
+ * A run uploads more than one artifact and GitHub does not promise an order.
+ * Selecting the first non-empty artifact reported "no usable APK" for a run
+ * whose workflow had succeeded, purely because test-reports came back first.
+ * These cases pin the selection to the content of the archives, not position.
+ */
+test('CASE 6-1/6-2: the APK artifact is found from either ordering', async () => {
+  const apk = buildApkFixture();
+  const apkArchive = makeZipArchive([{ name: 'app-debug.apk', content: apk }]);
+  const reportsArchive = makeZipArchive([{ name: 'results.xml', content: Buffer.from('<testsuite/>') }]);
+
+  const byId = new Map<number, Buffer>([[1, reportsArchive], [2, apkArchive]]);
+  const fetchBytes = async (id: number) => ({ ok: true, bytes: byId.get(id) ?? null });
+
+  const reportsFirst = [
+    { id: 1, name: 'test-reports', sizeInBytes: reportsArchive.length, expired: false },
+    { id: 2, name: 'app-debug-apk', sizeInBytes: apkArchive.length, expired: false },
+  ];
+  const apkFirst = [reportsFirst[1], reportsFirst[0]];
+
+  for (const [label, candidates] of [['reports first', reportsFirst], ['apk first', apkFirst]] as const) {
+    const picked = await selectApkArtifact(candidates, fetchBytes);
+    assert.equal(picked.ok, true, `${label}: should find the APK`);
+    assert.equal(picked.artifact?.name, 'app-debug-apk', `${label}: should pick the APK artifact`);
+    assert.equal(picked.fileName, 'app-debug.apk', `${label}: should report the member name`);
+    assert.equal(sha256Hex(picked.bytes!), sha256Hex(apk), `${label}: bytes should be the APK`);
+  }
+});
+
+test('CASE 6-3: a run with no APK anywhere is reported with every reason', async () => {
+  const reports = makeZipArchive([{ name: 'results.xml', content: Buffer.from('<testsuite/>') }]);
+  const fetchBytes = async () => ({ ok: true, bytes: reports });
+  const picked = await selectApkArtifact(
+    [{ id: 1, name: 'test-reports', sizeInBytes: reports.length, expired: false }],
+    fetchBytes,
+  );
+  assert.equal(picked.ok, false);
+  assert.equal(picked.problems.length, 1);
+  assert.match(picked.problems[0], /test-reports/);
+});

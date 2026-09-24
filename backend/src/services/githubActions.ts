@@ -556,7 +556,7 @@ export async function updateRef(repo: string, branch: string, sha: string): Prom
 // validated artifact, never from the dispatch response.
 // ---------------------------------------------------------------------------
 
-interface RunArtifact {
+export interface RunArtifact {
   id: number;
   name: string;
   sizeInBytes: number;

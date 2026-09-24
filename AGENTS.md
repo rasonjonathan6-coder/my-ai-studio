@@ -159,3 +159,35 @@ green later. The success path therefore checks the abort signal and uses
 `finishRun`, which only applies when the row is still `queued` or `running`.
 Any new terminal write should go through `finishRun` for the same reason.
 
+## GitHub Actions integration
+
+`backend/src/services/githubActions.ts` reports the state of the latest workflow
+run on the configured repository. `GITHUB_REPO` is the only hard requirement: a
+public repository is probed without a token, which is what makes `AVAILABLE` a
+real observation instead of a claim about configuration. `GITHUB_TOKEN` widens
+rate limits, unlocks private repositories, and is required for artifact
+downloads - GitHub refuses action artifact downloads without authentication, so a
+token-less server answers `503` rather than fetching anonymously.
+
+The artifact route (`GET /api/system/github/artifacts/:id`) verifies the id
+belongs to the latest run of the *configured* repository before streaming;
+otherwise an id from any other repository would be a proxy for the server's
+token.
+
+Do not render a bare environment-variable name in frontend code. The secret
+guard in `.github/workflows/build.yml` fails the build when the literal strings
+`sk-or-`, `OPENROUTER_API_KEY`, `DATABASE_URL` or `JWT_SECRET` appear anywhere in
+`dist/`, including inside a user-facing hint. `Settings.tsx` once contained
+"set JWT_SECRET in production" and broke the build only at the bundle step.
+
+## Local dev stack
+
+`scripts/dev-stack.sh up` starts Postgres and the backend with the toolchain
+mounts (`/opt/android-sdk`, `/opt/gradle-cache`) that Gradle tests and APK builds
+need. Starting the backend container by hand without those mounts makes steps 9
+and 10 of `scripts/smoke.sh` fail with "SDK location not found" - an environment
+problem, not a product bug. If `mas-pg` was created with a different password
+than `.dev-credentials` holds, TCP auth fails while the postgres superuser still
+works over the local socket; reset with
+`docker exec mas-pg psql -U studio -d myaistudio -c "ALTER ROLE studio WITH PASSWORD '...'"`.
+

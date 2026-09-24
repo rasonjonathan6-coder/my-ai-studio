@@ -741,3 +741,169 @@ canary endpoints are the only values that changed status in this session.
 - ORACLE CLOUD / CLOUDFLARE PAGES: NOT TESTED — no deployment performed.
 - ANDROID EMULATOR: NOT AVAILABLE — no device or emulator is attached, so the
   preview path stays honest and returns `available: false`.
+
+---
+
+## FINAL GATE — ADDENDUM (2026-09-24)
+
+This addendum covers the final gate: a fresh end-to-end run through the real UI
+contract, against the live `mas-api` container, with `FREE_ONLY=true`.
+
+Environment: branch `fix/multi-provider-routing-and-preview-contract`, HEAD
+`9906b2e`. Containers `mas-api` (healthy), `mas-audit` (healthy), `mas-pg` (up).
+
+### The run
+
+A brand-new user (`e2e-final@example.com`) was registered and a new empty
+`android` project created from the `android-hello` template
+(`f86479ea-d1e2-47b2-afc5-771fc2a740b4`). A single natural-language request was
+sent: add a counter with increment/reset, wire it into `MainActivity`, add a real
+JUnit test, then test and build.
+
+- Run `69455d28-…` **failed honestly**: the free-provider chain exhausted every
+  candidate (OpenRouter daily free quota already spent; Gemini, Groq, Cloudflare
+  and NVIDIA all rate-limited or erroring) and ended on NVIDIA HTTP 503. No
+  outcome was fabricated; the failure is visible in the conversation.
+- Run `ec130e11-…` **succeeded** on provider `gemini`, phases
+  `analyzing → planning → editing → testing → building → completed`, tokens
+  `20418` in / `1744` out, `fix attempts 0/5`. The UI states this plainly:
+  "served by Gemini (failed over from Groq)".
+
+### Independent verification of the artifacts
+
+Files written by the agent, read back from disk inside the container:
+
+```
+app/src/main/java/com/myaistudio/hello/Counter.kt        234 bytes  (new)
+app/src/main/java/com/myaistudio/hello/MainActivity.kt  1384 bytes  (modified)
+app/src/test/java/com/myaistudio/hello/CounterTest.kt    906 bytes  (new)
+```
+
+Gradle unit-test XML reports exist for both debug and release variants:
+
+```
+app/build/test-results/testDebugUnitTest/TEST-com.myaistudio.hello.CounterTest.xml
+app/build/test-results/testDebugUnitTest/TEST-com.myaistudio.hello.GreetingTest.xml
+app/build/test-results/testReleaseUnitTest/TEST-com.myaistudio.hello.CounterTest.xml
+app/build/test-results/testReleaseUnitTest/TEST-com.myaistudio.hello.GreetingTest.xml
+```
+
+`CounterTest` really ran: 4 tests, 0 failures, 0 errors.
+
+APK, produced by a real `./gradlew assembleDebug`:
+
+```
+path    app/build/outputs/apk/debug/app-debug.apk
+size    3 191 087 bytes
+sha256  ed1b8d96d6dada7139ba64702dd33b7919a67234ba99ed148e77eced56cf49c2
+package com.myaistudio.hello   versionName 1.0   versionCode 1
+minSdk  24   targetSdk 34
+```
+
+Structural check of the downloaded bytes: valid zip, 422 entries, CRC OK,
+`AndroidManifest.xml` + `resources.arsc` + `classes.dex`,`classes2.dex`,`classes3.dex`
+present.
+
+### Downloaded through the route the UI actually calls
+
+`GET /api/projects/:id/download/apk` returned HTTP 200, `3 191 087` bytes,
+`Content-Type: application/vnd.android.package-archive`,
+`Content-Disposition: attachment; filename="app-debug.apk"`. The SHA-256 of the
+downloaded bytes equals the artifact SHA-256 above — **MATCH**, verified by
+re-hashing the response body.
+
+### Export
+
+`POST /api/projects/:id/export` produced a real 51 476-byte zip, 35 entries,
+CRC OK, `excludedEntries: []`. It contains the agent's `Counter.kt` and
+`CounterTest.kt`, and contains **no** build output, **no** `.apk`, **no** `.env`,
+`secret`, `credential`, `.pem`, `.key`, `node_modules`, `apikey` or `token`
+entries.
+
+### Security scan
+
+`POST /api/projects/:id/security/scan` → `status: clean`, `filesScanned: 11`,
+`findings: 0` (memory-only regex scan; no `gitleaks` binary is used).
+
+### WebSocket
+
+Unauthenticated upgrade to `/ws` is rejected with `401`. An authenticated
+upgrade returns `101 Switching Protocols` with a valid `Sec-WebSocket-Accept`.
+
+### Real-time probe of deployment readiness
+
+`GET /api/system/status` — every value below came from a real probe:
+
+| Check | State | Detail |
+| --- | --- | --- |
+| node | AVAILABLE | v22.23.3 |
+| java | AVAILABLE | 17.0.20.1 |
+| git | AVAILABLE | 2.39.5 |
+| docker | AVAILABLE | 27.3.1, daemon reachable |
+| gradle | NOT_AVAILABLE | `/bin/sh: 1: gradle: not found` (wrapper is used) |
+| adb | AVAILABLE | 1.0.41 |
+| androidSdk | AVAILABLE | /opt/android-sdk |
+| postgres | AVAILABLE | 16.15 |
+| openrouter | ERROR | daily free quota exhausted; resets 2026-09-25T00:00:00Z |
+| gemini | AVAILABLE | 200 observed |
+| groq | AVAILABLE | 200 observed (later 429) |
+| cloudflare | AVAILABLE | 200 observed; `CHAT_ONLY` (tool protocol not verified) |
+| nvidia | AVAILABLE | 200 observed |
+| cerebras / mistral | NOT_TESTED | configured; blocked under FREE_ONLY |
+| huggingface / chutes / sambanova / ollama / vllm | NOT_AVAILABLE | not configured |
+| androidEmulator | NOT_AVAILABLE | adb present, no device attached |
+
+### Preview
+
+`POST /api/projects/:id/preview` → `available: false`,
+`status: NOT_AVAILABLE`, `devices: []`. `adb devices -l` is empty and there is no
+`/dev/kvm`. No static image is substituted for a live preview.
+
+### Frontend build and UI contract
+
+The production bundle was rebuilt with `VITE_API_URL` and served by
+`vite preview`. Driving the real UI in a browser: sign-in succeeded and set the
+`mas_session` `HttpOnly; Secure; SameSite=Lax` cookie; the dashboard rendered
+backend-sourced counts (`1` project, `2` builds, `2` builds ok, `2` APKs, sandbox
+`docker`); the project workspace opened with `AI | Files | Terminal | Build |
+Preview | Export`; the AI tab showed all nine agent phases ticked with the real
+summary text.
+
+A deployment note surfaced here: in local HTTP development the session cookie is
+marked `Secure`, so a browser will only keep it over HTTPS. This is correct for
+production (the shipped `.env.production.example` sets
+`SESSION_COOKIE_SAMESITE=none` and `DATABASE_SSL=true` behind HTTPS) but means
+plain-HTTP local sessions must be treated as unreliable rather than as a defect.
+
+### Final gate status
+
+| Area | Status | Evidence |
+| --- | --- | --- |
+| Environment | PASS | probes above |
+| Backend | PASS | healthy container; 97/97 tests in the prior session |
+| Frontend | PASS | rebuild + production bundle + real browser session |
+| Database | PASS | PostgreSQL 16.15 reachable, rows persisted |
+| Multi-provider (free) | PASS | gemini/groq/cloudflare/nvidia answered real requests |
+| OpenRouter | ERROR | free-model daily quota exhausted; honest reset time |
+| Agent loop | PASS | failed-then-succeeded runs, 0 fix attempts, real files |
+| Backend-driven build + APK | PASS | 3 191 087 bytes, downloaded SHA-256 MATCH |
+| APK inspection | PASS | package/version/sdk read from the artifact |
+| APK security scan | PASS | clean, 11 files, 0 findings |
+| Export | PASS | real zip, secrets and build output excluded |
+| WebSocket | PASS | 401 unauthenticated, 101 authenticated |
+| Android emulator / preview | NOT_AVAILABLE | no device, no /dev/kvm |
+| GitHub Actions | NOT TESTED | `GITHUB_REPO`/`GITHUB_TOKEN` unset; never dispatched |
+| Oracle / Cloudflare deploy | NOT TESTED | no deployment performed |
+
+### Exact next steps for the untested items
+
+1. GitHub Actions: set repository secrets `OPENROUTER_API_KEY` (and
+   `DATABASE_URL`, `JWT_SECRET` where the workflow needs them), push a real
+   remote, then `gh workflow run build-apk.yml -f sample=hello` and read the run
+   log. Until then the status stays `NOT TESTED` — the workflows are valid YAML
+   (`build-apk` → `apk`; `build` → `frontend`, `backend-image`, `docs-check`;
+   `security` → `secret-scan`, `dependency-audit`, `codeql`; `test` → `backend`)
+   but have never run on a runner.
+2. Android preview: attach a device/emulator host (or run an emulator with KVM)
+   and point `adb` at it; the existing preview path will install, launch and
+   capture logcat for real.

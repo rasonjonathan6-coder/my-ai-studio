@@ -1,6 +1,8 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,7 +10,7 @@ import { config } from '../src/config/index.ts';
 import { deriveStatus, isTerminal } from '../src/services/githubBuilds.ts';
 import {
   credentialKind, dispatchWorkflow, getGithubStatus, getRepoBranchHead, createBlobs, createTree, createCommit, updateRef,
-  extractApkFromArtifact,
+  extractApkFromArtifact, extractRunLogText,
 } from '../src/services/githubActions.ts';
 import { validateApkBuffer, readZipEntries, readZipEntry } from '../src/lib/apkZip.ts';
 import { collectPublishableFiles, syncWorkspaceToRepo } from '../src/services/githubSync.ts';
@@ -341,12 +343,30 @@ test('CASE 3: publishing the workspace drives the Git Data API in order and inst
       calls.push({ method: req.method ?? '', url: req.url ?? '', body });
       res.setHeader('content-type', 'application/json');
       const url = req.url ?? '';
+      if (url === '/repos/acme/studio') {
+        // The default branch is where GitHub registers workflow_dispatch.
+        res.end(JSON.stringify({ default_branch: 'main' }));
+        return;
+      }
       if (url === '/repos/acme/studio/git/ref/heads/my-ai-studio-build') {
         res.end(JSON.stringify({ object: { sha: 'b'.repeat(40) } }));
         return;
       }
+      if (url === '/repos/acme/studio/git/ref/heads/main') {
+        res.end(JSON.stringify({ object: { sha: 'd'.repeat(40) } }));
+        return;
+      }
       if (url === `/repos/acme/studio/git/commits/${'b'.repeat(40)}`) {
         res.end(JSON.stringify({ tree: { sha: 'tree-base' } }));
+        return;
+      }
+      if (url === `/repos/acme/studio/git/commits/${'d'.repeat(40)}`) {
+        res.end(JSON.stringify({ tree: { sha: 'tree-main' } }));
+        return;
+      }
+      if (url === '/repos/acme/studio/git/trees/tree-main?recursive=1') {
+        // The workflow is not on main yet, so the publish must install it.
+        res.end(JSON.stringify({ tree: [{ path: 'server.js', mode: '100644', type: 'blob', sha: 'srv' }], truncated: false }));
         return;
       }
       if (url === '/repos/acme/studio/git/blobs') {
@@ -363,6 +383,10 @@ test('CASE 3: publishing the workspace drives the Git Data API in order and inst
       }
       if (url === '/repos/acme/studio/git/refs/heads/my-ai-studio-build') {
         res.end(JSON.stringify({ object: { sha: 'c'.repeat(40) } }));
+        return;
+      }
+      if (url === '/repos/acme/studio/git/refs/heads/main') {
+        res.end(JSON.stringify({ object: { sha: 'e'.repeat(40) } }));
         return;
       }
       res.statusCode = 404;
@@ -398,6 +422,17 @@ test('CASE 3: publishing the workspace drives the Git Data API in order and inst
       // updateRef re-reads the head so it can choose PATCH over POST.
       'GET /repos/acme/studio/git/ref/heads/my-ai-studio-build',
       'PATCH /repos/acme/studio/git/refs/heads/my-ai-studio-build',
+      // The workflow is then installed on the default branch, because GitHub
+      // only registers workflow_dispatch there.
+      'GET /repos/acme/studio',
+      'GET /repos/acme/studio/git/ref/heads/main',
+      `GET /repos/acme/studio/git/commits/${'d'.repeat(40)}`,
+      'POST /repos/acme/studio/git/blobs',
+      'GET /repos/acme/studio/git/trees/tree-main?recursive=1',
+      'POST /repos/acme/studio/git/trees',
+      'POST /repos/acme/studio/git/commits',
+      'GET /repos/acme/studio/git/ref/heads/main',
+      'PATCH /repos/acme/studio/git/refs/heads/main',
     ]);
 
     // Trees are built over the existing snapshot, or a sparse publish would
@@ -421,6 +456,80 @@ test('CASE 3: publishing the workspace drives the Git Data API in order and inst
 
     assert.equal(result.filesPushed, 2, 'the workflow is installed in addition to the two project files');
     assert.equal(result.commitSha, 'c'.repeat(40));
+  } finally {
+    config.githubApiBaseUrl = saved.base;
+    config.githubToken = saved.token;
+    config.githubWorkflow = saved.workflow;
+    config.githubWorkflowRef = saved.ref;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('CASE 3c: a default branch that already holds the workflow is left alone', async () => {
+  // GitHub requires the workflow on the default branch for dispatch, but a
+  // publish must not add a commit to a user's main branch when nothing changed.
+  const projectId = 'publish-idempotent';
+  const projectDir = path.join(config.workspaceRoot, projectId);
+  await fs.mkdir(projectDir, { recursive: true });
+  await fs.writeFile(path.join(projectDir, 'Main.kt'), 'fun main() {}\n');
+
+  const workflowSource = await fs.readFile(
+    path.resolve(fileURLToPath(new URL('../../.github/workflows/android-build.yml', import.meta.url))),
+  );
+  // The blob sha GitHub reports for identical content, computed the same way.
+  const sameSha = crypto.createHash('sha1')
+    .update(Buffer.concat([Buffer.from(`blob ${workflowSource.length}\0`), workflowSource]))
+    .digest('hex');
+
+  const calls: string[] = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      calls.push(`${req.method} ${req.url}`);
+      res.setHeader('content-type', 'application/json');
+      const url = req.url ?? '';
+      if (url === '/repos/acme/studio') { res.end(JSON.stringify({ default_branch: 'main' })); return; }
+      if (url === '/repos/acme/studio/git/ref/heads/my-ai-studio-build') { res.end(JSON.stringify({ object: { sha: 'b'.repeat(40) } })); return; }
+      if (url === '/repos/acme/studio/git/ref/heads/main') { res.end(JSON.stringify({ object: { sha: 'd'.repeat(40) } })); return; }
+      if (url === `/repos/acme/studio/git/commits/${'b'.repeat(40)}`) { res.end(JSON.stringify({ tree: { sha: 'tree-base' } })); return; }
+      if (url === `/repos/acme/studio/git/commits/${'d'.repeat(40)}`) { res.end(JSON.stringify({ tree: { sha: 'tree-main' } })); return; }
+      if (url === '/repos/acme/studio/git/trees/tree-main?recursive=1') {
+        // The workflow is present with exactly the content being published.
+        res.end(JSON.stringify({
+          tree: [{ path: '.github/workflows/android-build.yml', mode: '100644', type: 'blob', sha: sameSha }],
+          truncated: false,
+        }));
+        return;
+      }
+      if (url === '/repos/acme/studio/git/blobs') { res.end(JSON.stringify({ sha: sameSha })); return; }
+      if (url === '/repos/acme/studio/git/trees') { res.end(JSON.stringify({ sha: 'tree-new' })); return; }
+      if (url === '/repos/acme/studio/git/commits') { res.end(JSON.stringify({ sha: 'c'.repeat(40) })); return; }
+      if (url === '/repos/acme/studio/git/refs/heads/my-ai-studio-build') { res.end(JSON.stringify({ object: { sha: 'c'.repeat(40) } })); return; }
+      res.statusCode = 404;
+      res.end(JSON.stringify({ message: 'unexpected call' }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const addr = server.address();
+  const base = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
+
+  const saved = { base: config.githubApiBaseUrl, token: config.githubToken, workflow: config.githubWorkflow, ref: config.githubWorkflowRef };
+  config.githubApiBaseUrl = base;
+  config.githubToken = 'ghp_' + 'a'.repeat(36);
+  config.githubWorkflow = 'android-build.yml';
+  config.githubWorkflowRef = 'my-ai-studio-build';
+
+  try {
+    const result = await syncWorkspaceToRepo({ projectId, repo: 'acme/studio', branch: 'my-ai-studio-build' });
+    assert.equal(result.ok, true, result.error ?? '');
+    assert.equal(result.workflowOnDefaultBranch, 'main');
+    assert.equal(result.defaultBranchError, undefined);
+    // Exactly one tree and one commit: the build branch. Nothing writes to main.
+    assert.equal(calls.filter((c) => c === 'POST /repos/acme/studio/git/trees').length, 1);
+    assert.equal(calls.filter((c) => c === 'POST /repos/acme/studio/git/commits').length, 1);
+    assert.equal(calls.some((c) => c === 'PATCH /repos/acme/studio/git/refs/heads/main'), false, 'main must not be rewritten');
   } finally {
     config.githubApiBaseUrl = saved.base;
     config.githubToken = saved.token;
@@ -473,6 +582,30 @@ test('CASE 3b: a refused write stops the publish before any commit is attempted'
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await fs.rm(projectDir, { recursive: true, force: true });
   }
+});
+
+test('CASE 16: a run log archive is unpacked into real text, and non-zips are refused', () => {
+  // GitHub serves per-job logs as a zip. The endpoint must show the log text,
+  // not a description of the archive, or fetching the logs is not actually done.
+  const archive = makeZip([
+    { name: '0_test and assemble debug.txt', content: Buffer.from('line one\nline two\n') },
+    { name: '1_other job.txt', content: Buffer.from('second job output\n') },
+  ]);
+  const text = extractRunLogText(archive);
+  assert.ok(text, 'a real archive must produce text');
+  assert.match(text!, /line one/);
+  assert.match(text!, /second job output/);
+  // Both files are present and the earlier job is listed first.
+  assert.ok(text!.indexOf('line one') < text!.indexOf('second job output'));
+
+  // A token planted in a log must not survive into what the API returns.
+  const planted = 'github_pat_' + 'A1b2C3d4'.repeat(4);
+  const withSecret = makeZip([{ name: '0_job.txt', content: Buffer.from(`using ${planted}\n`) }]);
+  const redacted = extractRunLogText(withSecret);
+  assert.ok(redacted && !redacted.includes(planted));
+
+  // Binary that is not an archive is reported, never presented as a log.
+  assert.equal(extractRunLogText(Buffer.from('not a zip at all')), null);
 });
 
 // ------------------------------------------------------------------ helpers

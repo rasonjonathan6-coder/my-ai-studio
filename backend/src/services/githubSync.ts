@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { config } from '../config/index.ts';
 import { logger } from '../lib/logger.ts';
 import { redact } from '../lib/logger.ts';
-import { getRepoBranchHead, createBlobs, createTree, createCommit, updateRef, getRepoTreeSha } from './githubActions.ts';
+import { getRepoBranchHead, createBlobs, createTree, createCommit, updateRef, getRepoTreeSha, getRepoDefaultBranch, getRepoTreeEntries } from './githubActions.ts';
 import { WorkspaceService } from './workspace.ts';
 import { defaultBuildRef } from './githubBuilds.ts';
 
@@ -65,6 +65,10 @@ export interface SyncResult {
   commitSha: string | null;
   filesPushed: number;
   skipped: string[];
+  /** Branch the managed workflow was installed on, enabling dispatch. */
+  workflowOnDefaultBranch?: string | null;
+  /** Why the default-branch install did not happen; publishing still counts. */
+  defaultBranchError?: string;
   error?: string;
 }
 
@@ -178,14 +182,72 @@ export async function syncWorkspaceToRepo(input: {
   const ref = await updateRef(repo, branch, commit.sha);
   if (!ref.ok) return { ...empty, skipped, error: `ref update failed: ${ref.error ?? 'unknown'}` };
 
+  // GitHub only registers a `workflow_dispatch` workflow that exists on the
+  // default branch. Publishing to the build branch alone leaves it undiscovered
+  // (`GET /actions/workflows` returns 0) and dispatch answers 404, so the
+  // managed workflow is also installed on the default branch when it differs.
+  const defaultBranch = await getRepoDefaultBranch(repo);
+  let workflowOnDefaultBranch: string | null = null;
+  let defaultBranchError: string | undefined;
+  if (!defaultBranch.ok || !defaultBranch.branch) {
+    defaultBranchError = `could not read the default branch: ${defaultBranch.error ?? 'unknown'}`;
+  } else if (defaultBranch.branch === branch) {
+    workflowOnDefaultBranch = branch;
+  } else {
+    const installed = await installWorkflowOnDefaultBranch(repo, defaultBranch.branch, workflow.content);
+    if (installed.ok) workflowOnDefaultBranch = defaultBranch.branch;
+    else defaultBranchError = installed.error;
+  }
+  if (defaultBranchError) {
+    logger.warn('managed workflow not installed on the default branch', { repo, error: defaultBranchError });
+  }
+
   logger.info('workspace synced to github', {
     projectId: input.projectId, repo, branch, files: files.length, commit: commit.sha.slice(0, 12),
-    workflow: managedWorkflowPath(),
+    workflow: managedWorkflowPath(), workflowOnDefaultBranch,
   });
   return {
     ok: true, repo, branch, commitSha: commit.sha,
-    filesPushed: files.length, skipped,
+    filesPushed: files.length, skipped, workflowOnDefaultBranch, defaultBranchError,
   };
+}
+
+/**
+ * Installs the managed workflow on the default branch so GitHub registers it as
+ * dispatchable. The write is skipped when the path already holds the identical
+ * content, so repeated publishes do not pile up commits on a user's main branch.
+ */
+async function installWorkflowOnDefaultBranch(repo: string, defaultBranch: string, content: Buffer): Promise<{ ok: boolean; error?: string }> {
+  const head = await getRepoBranchHead(repo, defaultBranch);
+  if (!head.ok || !head.sha) return { ok: false, error: `could not read ${defaultBranch}: ${head.error ?? 'unknown'}` };
+
+  const base = await getRepoTreeSha(repo, head.sha);
+  if (!base.ok || !base.sha) return { ok: false, error: `could not read ${defaultBranch} tree: ${base.error ?? 'unknown'}` };
+
+  const blobs = await createBlobs(repo, [{ content: content.toString('base64'), encoding: 'base64' }]);
+  if (!blobs.ok) return { ok: false, error: `blob creation failed: ${blobs.error ?? 'unknown'}` };
+
+  // Identical content means nothing to do; comparing blob shas avoids pushing an
+  // empty commit onto a user's default branch on every publish.
+  const entries = await getRepoTreeEntries(repo, base.sha);
+  if (entries.ok) {
+    const existing = entries.entries.find((e) => e.path === managedWorkflowPath());
+    if (existing && existing.sha === blobs.shas[0]) return { ok: true };
+  }
+
+  const tree = await createTree(repo, [{ path: managedWorkflowPath(), mode: '100644', type: 'blob', sha: blobs.shas[0] }], base.sha);
+  if (!tree.ok || !tree.sha) return { ok: false, error: `tree creation failed: ${tree.error ?? 'unknown'}` };
+
+  const commit = await createCommit(repo, {
+    message: 'My AI Studio: install the android-build workflow so Actions can dispatch it',
+    tree: tree.sha,
+    parents: [head.sha],
+  });
+  if (!commit.ok || !commit.sha) return { ok: false, error: `commit creation failed: ${commit.error ?? 'unknown'}` };
+
+  const ref = await updateRef(repo, defaultBranch, commit.sha);
+  if (!ref.ok) return { ok: false, error: `ref update failed: ${ref.error ?? 'unknown'}` };
+  return { ok: true };
 }
 
 /**

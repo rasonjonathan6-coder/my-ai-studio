@@ -429,6 +429,30 @@ export async function getRepoTreeSha(repo: string, commitSha: string): Promise<{
   return { ok: !!sha, sha, error: sha ? undefined : 'commit response carried no tree sha' };
 }
 
+/** Name of the repository's default branch, as GitHub reports it. */
+export async function getRepoDefaultBranch(repo: string): Promise<{ ok: boolean; branch: string | null; error?: string }> {
+  const cred = await resolveCredential();
+  if (!cred.ok) return { ok: false, branch: null, error: cred.error };
+  const res = await ghFetch(`/repos/${repo}`, config.githubTimeoutMs, { token: cred.token });
+  if (!res.ok) return { ok: false, branch: null, error: res.error ?? `HTTP ${res.status}` };
+  const branch = String((res.body as { default_branch?: string }).default_branch ?? '');
+  return { ok: !!branch, branch: branch || null, error: branch ? undefined : 'the repository reports no default branch' };
+}
+
+/** Lists a tree's entries recursively, as GitHub returns them. */
+export async function getRepoTreeEntries(repo: string, treeSha: string): Promise<{ ok: boolean; entries: Array<{ path: string; sha: string }>; error?: string }> {
+  const cred = await resolveCredential();
+  if (!cred.ok) return { ok: false, entries: [], error: cred.error };
+  const res = await ghFetch(`/repos/${repo}/git/trees/${treeSha}?recursive=1`, config.githubTimeoutMs, { token: cred.token });
+  if (!res.ok) return { ok: false, entries: [], error: res.error ?? `HTTP ${res.status}` };
+  const entries = (res.body as { tree?: Array<{ path?: string; sha?: string }> }).tree ?? [];
+  return {
+    ok: true,
+    entries: entries
+      .filter((e): e is { path: string; sha: string } => typeof e.path === 'string' && typeof e.sha === 'string'),
+  };
+}
+
 /** Creates blobs in one request; GitHub accepts the batched form for each entry. */
 export async function createBlobs(repo: string, blobs: Array<{ content: string; encoding?: string }>): Promise<{ ok: boolean; shas: string[]; error?: string }> {
   const cred = await resolveCredential();
@@ -655,16 +679,49 @@ export async function fetchRunLogs(repo: string, runId: number): Promise<{ ok: b
       redirect: 'follow',
     });
     if (!res.ok) return { ok: false, text: '', error: `HTTP ${res.status}` };
-    // GitHub serves a zip of per-job logs. The raw bytes are not useful as
-    // text, so the caller is told what happened rather than shown a binary blob.
     const buf = Buffer.from(await res.arrayBuffer());
-    return { ok: true, text: `GitHub returned a ${buf.length}-byte log archive for run ${runId} (application/zip).` };
+    // GitHub serves a zip holding one .txt per job. It is unpacked in-process so
+    // the caller gets the actual log text rather than a description of a blob.
+    const text = extractRunLogText(buf);
+    if (text === null) {
+      return { ok: true, text: `GitHub returned a ${buf.length}-byte log archive for run ${runId} that could not be read as a zip.` };
+    }
+    return { ok: true, text };
   } catch (err) {
     const aborted = err instanceof Error && err.name === 'AbortError';
     return { ok: false, text: '', error: aborted ? `timeout after ${config.githubTimeoutMs}ms` : redact(err instanceof Error ? err.message : String(err)) };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Unpacks a GitHub run-log archive into readable text, newest job last.
+ * Returns null when the bytes are not a zip, so the caller can say so instead of
+ * presenting binary data as a log.
+ */
+export function extractRunLogText(buf: Buffer, maxTotalBytes = 2 * 1024 * 1024): string | null {
+  const read = readZipEntries(buf);
+  if (!read.ok) return null;
+  const parts: string[] = [];
+  let total = 0;
+  // Job log names are `0_<job>.txt`, `1_<job>.txt`, so a plain sort is run order.
+  const names = read.entries.map((e) => e.name).filter((n) => n.endsWith('.txt')).sort();
+  for (const name of names) {
+    const raw = readZipEntry(buf, name);
+    if (!raw) continue;
+    const remaining = maxTotalBytes - total;
+    if (remaining <= 0) {
+      parts.push(`... log truncated at ${maxTotalBytes} bytes ...`);
+      break;
+    }
+    const slice = raw.length > remaining ? raw.subarray(0, remaining) : raw;
+    const text = redact(slice.toString('utf8'));
+    total += slice.length;
+    parts.push(`===== ${name} =====\n${text}`);
+  }
+  if (parts.length === 0) return null;
+  return parts.join('\n');
 }
 
 /** Downloads the bytes of one artifact, following the signed redirect. */

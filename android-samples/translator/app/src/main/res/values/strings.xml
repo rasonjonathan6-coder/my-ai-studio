@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Floating AI Translator</string>
-    <string name="accessibility_service_description">Shows a translate overlay for selected text. Enable only if you trust this app; some apps block accessibility access.</string>
+    <string name="accessibility_service_description">Shows a floating translate bubble. Read the last visible message, or translate text and inject it into the field you are typing in. Enable only if you trust this app: some apps block accessibility access.</string>
 </resources>

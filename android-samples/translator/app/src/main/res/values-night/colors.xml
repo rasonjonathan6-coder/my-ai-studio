@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The theme is DayNight, so the dark palette needs its own values or the
+     settings text would be near-black on a near-black background at night. -->
+<resources>
+    <color name="text_primary">#FFF2F3F8</color>
+    <color name="text_secondary">#FFB9BDCC</color>
+</resources>

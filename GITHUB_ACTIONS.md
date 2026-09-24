@@ -44,15 +44,19 @@ Steps, in order:
 2. Cache Gradle, keyed on the sample build files.
 3. For each selected sample, run `./gradlew test`.
 4. For each selected sample, run `./gradlew assembleDebug`.
-5. **Verify the APK exists on disk.** If no file matches
+5. For each selected sample, run `./gradlew lintDebug`. Lint fails the build on
+   errors. It is here because it catches API-level mistakes that compile cleanly
+   and then crash on the device - it found `AccessibilityNodeInfo.hintText`
+   (API 26+) in an app with `minSdk 24`.
+6. **Verify the APK exists on disk.** If no file matches
    `*/build/outputs/apk/debug/*.apk`, the job prints `BUILD FAILED` and exits 1.
    The APK is never assumed from Gradle's exit code.
-6. Inspect each APK with real tools: `aapt2 dump badging`, `dump permissions`,
+7. Inspect each APK with real tools: `aapt2 dump badging`, `dump permissions`,
    `dump xmltree --file AndroidManifest.xml`, and `apksigner verify --print-certs
    --verbose`. Reports are written to `apk-inspection/`.
-7. Unzip each APK and grep its contents for key-shaped strings, then grep the
+8. Unzip each APK and grep its contents for key-shaped strings, then grep the
    project sources. Any hit is `SECURITY FAILED` and the job fails.
-8. Package the APKs into `apk-artifact/` as `<sample>-app-debug.apk` together
+9. Package the APKs into `apk-artifact/` as `<sample>-app-debug.apk` together
    with `SHA256SUMS.txt` and `BUILD_INFO.txt` (commit, branch, build time, run
    number, Java, Gradle wrapper, Android Gradle Plugin, unit-test result, and
    each APK's name, size and SHA-256), grep that directory once more for

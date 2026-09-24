@@ -317,3 +317,30 @@ carries `apkScanned`, and a caller that ignores it is reporting on a scan that
 did not happen; `apkNote` states how many entries were read and why it failed
 when it did.
 
+The Android translator template is generated, not hand-written.
+`android-samples/translator` is the source of truth and is the app the
+`build-apk` workflow compiles; `npm run sync:translator-template -w backend`
+embeds its files into `backend/src/services/translatorTemplateFiles.ts` with
+`JSON.stringify`, so escaping is correct by construction. Hand-copying Kotlin
+into TypeScript template literals is what let the shipped template rot into a
+stub that never sent a translation. The package name and app label are stored as
+`__PACKAGE__`/`__APP_LABEL__` and substituted per project, in file paths as well
+as content. A backend test re-runs the sync and fails if the checked-in file is
+stale, so editing the sample without regenerating is caught.
+
+`build-apk.yml` runs `lintDebug` because it catches what compilation cannot: it
+found `AccessibilityNodeInfo.hintText` (API 26+) in an app with `minSdk 24`,
+which compiles and then crashes on the device. Lint fails on errors, not
+warnings, and all three samples pass it.
+
+The translator calls the studio's own `POST /api/translate` rather than any
+provider, so no provider key exists in the APK. The endpoint runs through the
+same `AUTO` router as the rest of the studio, so FREE_ONLY and failover apply.
+Injection uses `ACTION_SET_TEXT` and then re-reads the field: an app can accept
+the action and discard it, so a write is only reported as injected when the
+read-back matches. Reading other apps' text and writing into them depends on the
+target app exposing its views and accepting the write; when it does not, the app
+says which step failed instead of showing the translation as if it had been
+inserted. An emulator is not available in this environment (no KVM), so on-device
+behaviour is NOT TESTED; the build path is verified by CI.
+

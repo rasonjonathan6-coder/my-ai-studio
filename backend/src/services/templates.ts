@@ -7,6 +7,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WorkspaceService } from './workspace.ts';
+import { translatorTemplateFiles } from './translatorTemplate.ts';
 import type { ProjectKind } from './projects.ts';
 
 export interface TemplateDefinition {
@@ -176,40 +177,52 @@ The debug APK is written to \`app/build/outputs/apk/debug/app-debug.apk\`.
 
   const javaDir = `app/src/main/java/${pkgPath.join('/')}`;
   const testDir = `app/src/test/java/${pkgPath.join('/')}`;
+
+  if (templateId === 'android-floating-translator') {
+    // The translator's sources are generated from android-samples/translator, so
+    // the shipped template is the same app the Android CI workflow builds. Only
+    // the package name and app label differ per project; paths are rewritten too
+    // because the package is part of the directory name.
+    const files = translatorTemplateFiles(pkg, appLabel);
+    for (const [rel, content] of Object.entries(files)) base[rel] = content;
+    return base;
+  }
+
   const kotlinFiles = kotlinTemplateFiles(templateId, pkg);
   for (const [rel, content] of Object.entries(kotlinFiles.main)) base[`${javaDir}/${rel}`] = content;
   for (const [rel, content] of Object.entries(kotlinFiles.test)) base[`${testDir}/${rel}`] = content;
-
-  // The translator manifest references this resource; without it aapt2 fails
-  // resource linking and the build cannot succeed.
-  if (templateId === 'android-floating-translator') {
-    base['app/src/main/res/xml/accessibility_service_config.xml'] = `<?xml version="1.0" encoding="utf-8"?>
-<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeViewTextSelectionChanged|typeWindowStateChanged"
-    android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows"
-    android:canRetrieveWindowContent="true"
-    android:description="@string/accessibility_service_description"
-    android:notificationTimeout="100" />
-`;
-    base['app/src/main/res/values/strings.xml'] = `<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">${appLabel}</string>
-    <string name="accessibility_service_description">Shows a translate overlay for selected text. Enable only if you trust this app; some apps block accessibility access.</string>
-</resources>
-`;
-  }
 
   return base;
 }
 
 function appBuildGradle(templateId: string, pkg: string): string {
-  void pkg;
+  const isTranslator = templateId === 'android-floating-translator';
+  const versionCode = isTranslator ? 2 : 1;
+  const versionName = isTranslator ? '2.0' : '1.0';
   const plugins = `plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
 `;
+  // The translator's overlay uses Material components and its unit tests parse
+  // JSON with the real org.json; the sample's build file is the reference for
+  // both, so the generated project gets the same dependencies.
+  const dependencies = isTranslator
+    ? `dependencies {
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("com.google.android.material:material:1.12.0")
+    testImplementation("junit:junit:4.13.2")
+    // The Android SDK ships org.json as a stub that throws under unit tests, so
+    // the real implementation goes on the test classpath only.
+    testImplementation("org.json:json:20240303")
+}`
+    : `dependencies {
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    testImplementation("junit:junit:4.13.2")
+}`;
+
   const androidBlock = `
 android {
     namespace = "${pkg}"
@@ -219,8 +232,8 @@ android {
         applicationId = "${pkg}"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = ${versionCode}
+        versionName = "${versionName}"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -240,18 +253,15 @@ android {
     }
 }
 
-dependencies {
-    implementation("androidx.core:core-ktx:1.13.1")
-    implementation("androidx.appcompat:appcompat:1.7.0")
-    testImplementation("junit:junit:4.13.2")
-}
+${dependencies}
 `;
 
-  if (templateId === 'android-floating-translator') {
+  if (isTranslator) {
     return `${plugins}${androidBlock}
-// Note: the accessibility service and overlay require the user to grant
-// permissions manually at runtime. Some applications deliberately block
-// accessibility APIs for security, so behaviour is not universal.
+// Note: the accessibility service and the overlay both need permissions the
+// user grants by hand in system settings. Some applications deliberately block
+// accessibility APIs for security, so field access and text injection do not
+// work everywhere; the app reports what it could not do instead of pretending.
 `;
   }
   return `${plugins}${androidBlock}`;
@@ -267,10 +277,13 @@ function androidManifest(templateId: string, pkg: string): string {
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
+    <!-- The bubble is a normal overlay window. Cleartext is allowed only so a
+         self-hosted dev server on the LAN works; production should use HTTPS. -->
     <application
         android:allowBackup="true"
         android:label="@string/app_name"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.App">
 
         <activity
@@ -282,9 +295,13 @@ function androidManifest(templateId: string, pkg: string): string {
             </intent-filter>
         </activity>
 
+        <!-- exported=true is required for the system to bind the service; it is
+             the BIND_ACCESSIBILITY_SERVICE permission, not the export flag, that
+             restricts who may bind it. -->
         <service
             android:name=".TranslatorAccessibilityService"
             android:exported="true"
+            android:label="@string/app_name"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />

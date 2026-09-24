@@ -102,6 +102,18 @@ jobs:
             ./android-samples/$s/gradlew -p "android-samples/$s" assembleDebug --console=plain --no-daemon
           done
 
+      - name: Run Android lint
+        run: |
+          set -e
+          # lintDebug fails the build on errors, not warnings. It is here because
+          # it catches API-level mistakes that compile cleanly: it found a call to
+          # AccessibilityNodeInfo.hintText (API 26+) in an app with minSdk 24,
+          # which would have crashed on a real device.
+          for s in ${{ steps.pick.outputs.samples }}; do
+            echo "=== lintDebug: $s ==="
+            ./android-samples/$s/gradlew -p "android-samples/$s" lintDebug --console=plain --no-daemon
+          done
+
       - name: Verify the APK file really exists
         run: |
           set -e

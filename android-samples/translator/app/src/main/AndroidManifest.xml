@@ -5,10 +5,13 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
+    <!-- The bubble is a normal overlay window. Cleartext is allowed only so a
+         self-hosted dev server on the LAN works; production should use HTTPS. -->
     <application
         android:allowBackup="true"
         android:label="@string/app_name"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.App">
 
         <activity
@@ -20,9 +23,13 @@
             </intent-filter>
         </activity>
 
+        <!-- exported=true is required for the system to bind the service; it is
+             the BIND_ACCESSIBILITY_SERVICE permission, not the export flag, that
+             restricts who may bind it. -->
         <service
             android:name=".TranslatorAccessibilityService"
             android:exported="true"
+            android:label="@string/app_name"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />

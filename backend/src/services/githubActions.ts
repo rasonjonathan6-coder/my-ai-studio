@@ -163,6 +163,27 @@ function headers(token?: string | null): Record<string, string> {
   return h;
 }
 
+/**
+ * Turns an authorization refusal into something an operator can act on.
+ *
+ * A read-only credential passes every GET and then fails the first write with
+ * "Resource not accessible by integration", which names neither the permission
+ * nor the fix. GitHub returns the permission it wanted in a response header, but
+ * the fetch wrapper only surfaces the body, so the mapping is done on the
+ * message GitHub is known to return for a missing permission.
+ */
+function permissionHint(status: number, message: unknown): string {
+  const text = String(message ?? '');
+  if (status !== 403) return '';
+  if (/not accessible by integration/i.test(text)) {
+    return ' — the server credential is authenticated but not authorized to write: it needs a fine-grained token with Contents: write and Actions: write on this repository, or a GitHub App with those permissions';
+  }
+  if (/Resource not accessible|forbidden/i.test(text)) {
+    return ' — the server credential lacks permission for this operation';
+  }
+  return '';
+}
+
 async function ghFetch(path: string, timeoutMs = config.githubTimeoutMs, init?: { method?: string; body?: unknown; token?: string | null }): Promise<{ ok: boolean; status: number; body: unknown; error?: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -187,7 +208,7 @@ async function ghFetch(path: string, timeoutMs = config.githubTimeoutMs, init?: 
       // GitHub's message is useful, but it must pass through the redactor in
       // case an operator pasted a token-bearing URL into the repo field.
       const message = (body as { message?: string } | null)?.message ?? res.statusText;
-      return { ok: false, status: res.status, body, error: `${res.status} ${redact(String(message))}` };
+      return { ok: false, status: res.status, body, error: `${res.status} ${redact(String(message))}${permissionHint(res.status, message)}` };
     }
     return { ok: true, status: res.status, body };
   } catch (err) {

@@ -165,6 +165,33 @@ garbage-collects. `canWrite: false` means the credential is authenticated but
 unauthorized, and publishing or dispatching will be refused; `null` means the
 probe was inconclusive (no credential, or a network failure).
 
+### The credential needs write permissions, not just read
+
+A token that can read the repository is not enough. Publishing writes blobs and
+updates a ref, and dispatching calls `POST .../dispatches`; a read-only
+credential answers `200` to every `GET` and then `403 Resource not accessible by
+integration` to the first write. When that happens the error now says so
+directly and names the fix, rather than passing GitHub's message through
+unexplained.
+
+For a fine-grained personal access token on `owner/repo`:
+
+| Permission | Level | Needed for |
+| --- | --- | --- |
+| Contents | Read and write | publishing the workspace (blobs, tree, commit, ref) |
+| Actions | Read and write | dispatching the workflow, cancelling a run |
+
+Metadata: Read is granted automatically and is not settable.
+
+A GitHub App used instead of a token needs the same two permissions, plus
+`Metadata: Read`. `canWrite` is probed for both credential shapes.
+
+Server-side only: the token is read from the environment, attached to outbound
+requests, and redacted from logs and error strings. It is never placed in an API
+response, a WebSocket frame, an exported ZIP or a log line. `GET /api/system/github`
+reports `tokenConfigured: true` and the credential kind (`token` or `app`),
+never the value.
+
 ## Publishing the workspace and dispatching the build
 
 | Route | Behaviour |

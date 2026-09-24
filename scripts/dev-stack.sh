@@ -106,12 +106,26 @@ start_backend() {
   local or_args=()
   if [ -f "$ROOT/.env" ]; then
     local key model
-    for prefix in OPENROUTER GEMINI GROQ; do
-      key="$(sed -n "s/^${prefix}_API_KEY=//p" "$ROOT/.env" | head -1)"
-      model="$(sed -n "s/^${prefix}_MODEL=//p" "$ROOT/.env" | head -1)"
-      [ -n "$key" ] && or_args+=(-e "${prefix}_API_KEY=$key")
-      [ -n "$model" ] && or_args+=(-e "${prefix}_MODEL=$model")
+    # Each entry is KEY_VAR:MODEL_VAR. Cloudflare uses a token plus an account
+    # id instead of a single key, so its account id is forwarded separately.
+    for spec in \
+      "OPENROUTER:OPENROUTER_API_KEY:OPENROUTER_MODEL" \
+      "GEMINI:GEMINI_API_KEY:GEMINI_MODEL" \
+      "GROQ:GROQ_API_KEY:GROQ_MODEL" \
+      "CEREBRAS:CEREBRAS_API_KEY:CEREBRAS_MODEL" \
+      "MISTRAL:MISTRAL_API_KEY:MISTRAL_MODEL" \
+      "NVIDIA:NVIDIA_API_KEY:NVIDIA_MODEL" \
+      "CLOUDFLARE:CLOUDFLARE_API_TOKEN:CLOUDFLARE_MODEL"; do
+      rest="${spec#*:}"
+      key_name="${rest%%:*}"; model_name="${rest#*:}"
+      key="$(sed -n "s/^${key_name}=//p" "$ROOT/.env" | head -1)"
+      model="$(sed -n "s/^${model_name}=//p" "$ROOT/.env" | head -1)"
+      [ -n "$key" ] && or_args+=(-e "${key_name}=$key")
+      [ -n "$model" ] && or_args+=(-e "${model_name}=$model")
     done
+    local cf_account
+    cf_account="$(sed -n 's/^CLOUDFLARE_ACCOUNT_ID=//p' "$ROOT/.env" | head -1)"
+    [ -n "$cf_account" ] && or_args+=(-e "CLOUDFLARE_ACCOUNT_ID=$cf_account")
   fi
   $DOCKER run -d --name "$API_CONTAINER" -p 8080:8080 --link "$PG_CONTAINER":pg \
     --group-add "$(socket_gid)" \

@@ -143,19 +143,23 @@ test('AUTO does not fail over on a bad credential; the real error surfaces', asy
 });
 
 test('AUTO reports not_configured only when no provider has a key', async () => {
-  const saved = { o: config.openRouterApiKey, g: config.geminiApiKey, q: config.groqApiKey };
-  config.openRouterApiKey = '';
-  config.geminiApiKey = '';
-  config.groqApiKey = '';
+  // Every provider credential must be blanked, not just the original three:
+  // an operator who configures additional providers in .env would otherwise
+  // make this test attempt a real call and fail on the network.
+  const fields = [
+    'openRouterApiKey', 'geminiApiKey', 'groqApiKey', 'cerebrasApiKey',
+    'mistralApiKey', 'cloudflareApiToken', 'cloudflareAccountId', 'nvidiaApiKey',
+    'hfToken', 'chutesApiKey', 'sambanovaApiKey',
+  ] as const;
+  const saved = Object.fromEntries(fields.map((f) => [f, config[f]]));
+  for (const f of fields) (config as Record<string, unknown>)[f] = '';
   try {
     const out = await router.chat('auto', call);
     assert.equal(out.ok, false);
     if (out.ok) return;
     assert.equal(out.kind, 'not_configured');
   } finally {
-    config.openRouterApiKey = saved.o;
-    config.geminiApiKey = saved.g;
-    config.groqApiKey = saved.q;
+    for (const f of fields) (config as Record<string, unknown>)[f] = saved[f];
   }
 });
 

@@ -91,7 +91,7 @@ export const config = {
   // --- Additional providers, each calling its own official API directly. ---
   // Every one is optional: an absent key means NOT_CONFIGURED, not an error.
   cerebrasApiKey: env('CEREBRAS_API_KEY'),
-  cerebrasModel: env('CEREBRAS_MODEL', 'qwen-3-235b-a22b-instruct-2507'),
+  cerebrasModel: env('CEREBRAS_MODEL', 'gpt-oss-120b'),
   cerebrasBaseUrl: env('CEREBRAS_BASE_URL', 'https://api.cerebras.ai/v1'),
   cerebrasTimeoutMs: int('CEREBRAS_TIMEOUT_MS', 120000),
 

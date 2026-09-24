@@ -1,6 +1,6 @@
 import type {
   AgentRun, AiAutoProbeResponse, AiModel, AiModelTestResult, AiProviderProbeResult, AiProviderTestResult, AiProvidersResponse,
-  BuildResult, CommandResult, Conversation,
+  BuildResult, CommandHistoryEntry, CommandResult, Conversation,
   ExportResult, FileEntry, FreePlanEntry, GithubStatus, Message, ModelSummary, PreviewResult, Project, ProviderSelection, SecurityScan, SystemStatus, User,
 } from './types.ts';
 
@@ -100,7 +100,7 @@ export const api = {
 
   // terminal
   terminal: (id: string, command: string) => request<CommandResult>(`/api/projects/${id}/terminal`, json({ command })),
-  terminalHistory: (id: string) => request<{ commands: CommandResult[] }>(`/api/projects/${id}/terminal`),
+  terminalHistory: (id: string) => request<{ commands: CommandHistoryEntry[] }>(`/api/projects/${id}/terminal`),
 
   // agent
   runAgent: (id: string, prompt: string, provider: ProviderSelection = 'auto') =>

@@ -91,10 +91,10 @@ export async function runTerminalCommand(input: {
 }
 
 export async function listCommands(projectId: string, limit = 25): Promise<
-  Array<{ id: string; command: string; exit_code: number | null; status: string; created_at: Date; duration_ms: number | null }>
+  Array<{ id: string; command: string; source: string | null; exit_code: number | null; status: string; created_at: Date; duration_ms: number | null }>
 > {
-  const res = await query<{ id: string; command: string; exit_code: number | null; status: string; created_at: Date; duration_ms: number | null }>(
-    `SELECT id, command, exit_code, status, created_at, duration_ms FROM commands
+  const res = await query<{ id: string; command: string; source: string; exit_code: number | null; status: string; created_at: Date; duration_ms: number | null }>(
+    `SELECT id, command, source, exit_code, status, created_at, duration_ms FROM commands
      WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2`,
     [projectId, limit],
   );

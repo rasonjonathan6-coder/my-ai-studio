@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api/client.ts';
-import { Card, Empty, StatePill, bytes } from '../components/ui.tsx';
-import type { CommandResult, WsEvent } from '../api/types.ts';
+import { Card, Empty, StatePill } from '../components/ui.tsx';
+import type { CommandHistoryEntry, WsEvent } from '../api/types.ts';
 
 const QUICK = ['ls -la', 'git status', 'node --version', 'java -version', './gradlew --version'];
 
 export function TerminalScreen({ projectId, events }: { projectId: string; events: WsEvent[] }) {
-  const [entries, setEntries] = useState<CommandResult[]>([]);
+  const [entries, setEntries] = useState<CommandHistoryEntry[]>([]);
   const [command, setCommand] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -46,7 +46,12 @@ export function TerminalScreen({ projectId, events }: { projectId: string; event
     setCommand('');
     try {
       const res = await api.terminal(projectId, c);
-      setEntries((prev) => [res, ...prev].slice(0, 30));
+      // A freshly run command is shown immediately, then the persisted history
+      // replaces it on the next load - the two shapes differ, so map across.
+      setEntries((prev) => [{
+        id: res.id, command: res.command, source: 'terminal' as const, exit_code: res.exitCode,
+        status: res.status, created_at: new Date().toISOString(), duration_ms: res.durationMs,
+      }, ...prev].slice(0, 30));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -101,20 +106,16 @@ export function TerminalScreen({ projectId, events }: { projectId: string; event
           {entries.map((entry) => (
             <div key={entry.id} style={{ marginBottom: 14 }}>
               <div className="row" style={{ marginBottom: 6 }}>
-                <span className="mono" style={{ color: 'var(--cyan)' }}>$ {entry.command}</span>
+                <span className="mono" style={{ color: 'var(--cyan)', wordBreak: 'break-all' }}>$ {entry.command}</span>
                 <StatePill value={entry.status.toUpperCase()} />
+                {entry.source === 'agent' && <span className="pill" title="Executed by the AI agent, not typed by you">agent</span>}
                 <span className="hint">
-                  exit {entry.exitCode ?? 'n/a'} · {entry.durationMs} ms · {entry.backend}
-                  {entry.truncated ? ' · output truncated' : ''}
-                  {entry.timedOut ? ' · timed out' : ''}
+                  exit {entry.exit_code ?? 'n/a'} · {entry.duration_ms ?? 0} ms · {new Date(entry.created_at).toLocaleString()}
                 </span>
               </div>
-              <div className="term">
-                {entry.stdout && <span>{entry.stdout}</span>}
-                {entry.stderr && <span className="err">{entry.stderr}</span>}
-                {!entry.stdout && !entry.stderr && <span className="meta">(no output)</span>}
+              <div className="hint" style={{ marginTop: 4 }}>
+                Full stdout/stderr for a past command is in its build or run log.
               </div>
-              <div className="hint" style={{ marginTop: 4 }}>cwd: {entry.cwd} · {bytes((entry.stdout.length + entry.stderr.length))} of output</div>
             </div>
           ))}
         </Card>

@@ -41,6 +41,17 @@ export interface CommandResult {
   status: 'succeeded' | 'failed' | 'timeout' | 'rejected';
 }
 
+/** A row from the terminal history; `source` is 'agent' for agent-driven runs. */
+export interface CommandHistoryEntry {
+  id: string;
+  command: string;
+  source: 'terminal' | 'agent' | 'build' | 'test' | null;
+  exit_code: number | null;
+  status: string;
+  created_at: string;
+  duration_ms: number | null;
+}
+
 export interface Message {
   id: string;
   role: 'user' | 'assistant' | 'system' | 'tool';

@@ -42,13 +42,28 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        run: |
+          set -e
+          # android-actions/setup-android@v3 is deliberately not used. It shells
+          # out to `sdkmanager tools`, and cmdline-tools 16.0 no longer ships a
+          # "tools" package, so the action exits 1 and every build step is
+          # skipped (run 36059527633). Installing the command line tools
+          # directly keeps the toolchain explicit: the archive is pinned and
+          # checked against a sha256 before it is unpacked.
+          CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+          CMDLINE_TOOLS_SHA256="2d2d50857e4eb553af5a6dc3ad507a17adf43d115264b1afc116f95c92e5e258"
+          curl -sfL -o /tmp/cmdline-tools.zip "$CMDLINE_TOOLS_URL"
+          echo "$CMDLINE_TOOLS_SHA256  /tmp/cmdline-tools.zip" | sha256sum -c -
+          rm -rf /tmp/cmdline-tools-unpack "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          unzip -qq /tmp/cmdline-tools.zip -d /tmp/cmdline-tools-unpack
+          mv /tmp/cmdline-tools-unpack/cmdline-tools "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
 
       - name: Install platform and build tools
         run: |
           set -e
-          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
           yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
           echo "--- installed packages ---"
           sdkmanager --list_installed
 

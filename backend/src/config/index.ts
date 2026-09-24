@@ -242,8 +242,19 @@ export const config = {
   // Default workflow file the build endpoint dispatches when the request does
   // not name one. Only names on this allow-list can ever be dispatched, so a
   // crafted request cannot run an arbitrary file in the repository.
-  githubWorkflow: env('GITHUB_WORKFLOW', 'android-build.yml'),
-  githubWorkflowRef: env('GITHUB_WORKFLOW_REF', ''),
+  //
+  // Deliberately NOT GITHUB_WORKFLOW, and with no fallback to it. That name is
+  // a GitHub Actions built-in: on a runner it holds the *display name* of the
+  // workflow being executed ("test", "build", ...). A process variable beats
+  // --env-file, so reading it made the app dispatch a workflow that does not
+  // exist and report actions:false - which is exactly what the CI run on this
+  // repository did. The built-in cannot be distinguished from a deployment's
+  // own value, so there is no safe way to honour it; same reasoning as the
+  // token above. GITHUB_WORKFLOW_REF has the identical problem - on a runner it
+  // is "owner/repo/.github/workflows/x.yml@refs/heads/main", and it is used as
+  // a branch name, so it would publish to a branch that cannot exist.
+  githubWorkflow: env('MY_AI_STUDIO_GITHUB_WORKFLOW', 'android-build.yml'),
+  githubWorkflowRef: env('MY_AI_STUDIO_GITHUB_WORKFLOW_REF', ''),
   githubBuildTimeoutMs: int('GITHUB_BUILD_TIMEOUT_MS', 20 * 60 * 1000),
   githubBuildPollMs: int('GITHUB_BUILD_POLL_MS', 5000),
   githubBuildRateLimitMax: int('GITHUB_BUILD_RATE_LIMIT_MAX', 10),

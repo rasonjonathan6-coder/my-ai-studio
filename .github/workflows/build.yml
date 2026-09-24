@@ -92,9 +92,17 @@ jobs:
             docker exec ci-pg pg_isready -U myaistudio > /dev/null 2>&1 && break
             sleep 1
           done
+          # ALLOW_HOST_EXECUTION_IN_PRODUCTION is required here: the image is a
+          # real production build, and the boot guard refuses to start without
+          # either a usable sandbox or this explicit opt-in. This container is
+          # throwaway, single-tenant and holds no real secret, so the opt-in is
+          # the correct choice - mounting a Docker socket just to satisfy a
+          # health probe would be the riskier option. The guard's own behaviour
+          # is covered for real in backend/tests/productionGuard.test.ts.
           docker run -d --name backend-ci --network ci-net -p 8080:8080 \
             -e NODE_ENV=production \
             -e JWT_SECRET=ci-container-secret-not-for-real-use \
+            -e ALLOW_HOST_EXECUTION_IN_PRODUCTION=true \
             -e DATABASE_URL=postgres://myaistudio:ci-password@ci-pg:5432/myaistudio \
             my-ai-studio-backend:ci
           ok=0

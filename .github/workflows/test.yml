@@ -90,3 +90,26 @@ jobs:
           curl -s http://127.0.0.1:8080/api/health
           curl -s http://127.0.0.1:8080/api/system/status | head -c 400
           kill $(cat /tmp/dev.pid) || true
+
+  # A separate job rather than steps in the backend job: the watchdog has no
+  # relationship to the backend's dependencies, and it is also the one component
+  # that must keep working when the backend does not. Sharing a job would let a
+  # backend install failure hide a watchdog regression, which is the opposite of
+  # what this is here to catch.
+  watchdog:
+    name: Watchdog (unit tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # No install step, deliberately. The watchdog depends on nothing outside
+      # Node's own modules, and it has no lockfile, so `npm ci` would fail rather
+      # than install anything. Add an install step here only once package.json
+      # declares a dependency and a lockfile exists to go with it.
+      - name: Run watchdog tests
+        run: npm test --prefix watchdog

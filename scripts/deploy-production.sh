@@ -97,8 +97,15 @@ if [ "$SCHEME" = https ]; then CURL+=(-k); fi
 
 step 'Building images'
 # The sandbox image is built on the host, not as a compose service: the backend
-# launches it by name via the daemon socket.
-if ! sudo docker build -f sandbox/Dockerfile -t my-ai-studio-sandbox:latest . ; then
+# launches it by name via the daemon socket. The JDK is opt-in via
+# INSTALL_ANDROID_TOOLCHAIN, and omitting the arg here silently produced a
+# sandbox with no java, so every Android build died with an invalid JAVA_HOME.
+INSTALL_ANDROID_TOOLCHAIN="$(env_value INSTALL_ANDROID_TOOLCHAIN)"
+INSTALL_ANDROID_TOOLCHAIN="${INSTALL_ANDROID_TOOLCHAIN:-1}"
+echo "sandbox JDK: INSTALL_ANDROID_TOOLCHAIN=$INSTALL_ANDROID_TOOLCHAIN"
+if ! sudo docker build -f sandbox/Dockerfile \
+       --build-arg "INSTALL_ANDROID_TOOLCHAIN=$INSTALL_ANDROID_TOOLCHAIN" \
+       -t my-ai-studio-sandbox:latest . ; then
   echo 'FAILED: sandbox image build'
   exit 1
 fi

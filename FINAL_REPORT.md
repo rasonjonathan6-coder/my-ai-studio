@@ -1628,8 +1628,39 @@ emulator.
 
 ### APK build
 
-The build path never touched the emulator code. `.github/workflows/build-apk.yml`,
-`android-build.yml` and `security.yml` are byte-identical to the previous commit;
-the real APK build result for this change is in the workflow run for the commit
-below.
+The build path never touched the emulator code: `sandbox/Dockerfile`,
+`docker-compose*.yml` and the tested Gradle/JDK/SDK steps in the workflows are
+unchanged by this removal.
+
+Verified on `d8647b1` and `3c29713` with dispatched GitHub Actions runs:
+
+- `build-apk` (sample `calculator`, run 36094369753) - success.
+- `android-build` (`subdir=android-samples/hello`, run 36095150056) - success.
+
+The first `android-build` dispatch (run 36094379007) failed, and it was a real
+bug worth fixing rather than a flake: Gradle ran `:app:test` and
+`:app:assembleDebug` successfully and the locate step found the APK, but the
+packaging step then ran from the repository root while the recorded path was
+relative to the project directory, so `cp` failed with `No such file or
+directory`. The product dispatches `android-build` with no `subdir`, so a project
+at the repository root hides the bug - only a subdirectory exposes it. Fixed in
+`3c29713` by running the step from the resolved project directory and anchoring
+the artifact directory at `$GITHUB_WORKSPACE`.
+
+The artifact from run 36095150056 was downloaded and opened, not just counted:
+
+| Property | Value |
+| --- | --- |
+| Artifact | `app-debug-apk`, 2 889 145 bytes zipped |
+| `app-debug.apk` | 3 189 835 bytes |
+| SHA-256 | `33868d68...30bf4`, recomputed and equal to `BUILD_INFO.txt` and `SHA256SUMS.txt` |
+| ZIP magic | `PK\x03\x04` |
+| Entries | 422, including `AndroidManifest.xml` and `classes.dex`/`classes2.dex`/`classes3.dex` |
+| Built with | OpenJDK 17.0.20.1, commit `3c29713` |
+
+Inspected with the product's own `inspectApk`: package `com.myaistudio.hello`,
+version 1.0 (code 1), minSdk 24, targetSdk 34, launcher
+`com.myaistudio.hello.MainActivity`, 3 dex files, `debugBuild: true`. It reported
+`toolsUsed: [zipreader, axml]` and honestly noted that `aapt2`/`apksigner` were
+absent on this host, so `signed` stayed `null` instead of being guessed.
 

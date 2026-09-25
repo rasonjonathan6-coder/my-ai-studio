@@ -1411,3 +1411,61 @@ it and the remote fast-forwarded:
 
 Anyone hitting the same 403 should reach for the deployment token before
 concluding that write access is unavailable.
+
+### Sandbox Android build: root cause and fix
+
+The in-app Android build failed on a freshly deployed stack with:
+
+```
+ERROR: JAVA_HOME is set to an invalid directory: /usr/lib/jvm/java-17-openjdk-amd64
+```
+
+The sandbox image had no Java at all. `scripts/deploy-production.sh` built it as
+`docker build -f sandbox/Dockerfile -t my-ai-studio-sandbox:latest .` with no
+`--build-arg`, so `INSTALL_ANDROID_TOOLCHAIN` took its default of `0` and the
+JDK layer was skipped. `scripts/dev-stack.sh` did pass the argument, which is
+why Android builds worked in development and broke only after a clean
+production deploy Ñ the two scripts disagreed.
+
+Fixed in `741627b`: the deploy script now reads `INSTALL_ANDROID_TOOLCHAIN` from
+`.env` (defaulting to `1`) and forwards it, so a fresh deploy produces a sandbox
+that can compile. Verified by rebuilding the image and asserting Java is present
+at the exact `JAVA_HOME` path:
+
+```
+$ docker run --rm my-ai-studio-sandbox:latest sh -c 'java -version; ls -d /usr/lib/jvm/*'
+openjdk version "17.0.20.1" 2026-08-18
+/usr/lib/jvm/java-1.17.0-openjdk-amd64
+/usr/lib/jvm/java-17-openjdk-amd64
+```
+
+End-to-end through the public API afterwards, on the reference Android project:
+
+| Step | Result |
+| --- | --- |
+| `POST /api/projects/:id/build` | `succeeded`, exit 0, 57.5s |
+| APK on disk | `app-debug.apk`, 3,191,115 bytes |
+| `GET /api/projects/:id/download/apk` | HTTP 200, same byte count, SHA-256 matches |
+| APK inspection | `com.myaistudio.calculator`, v1.0 (1), minSdk 24, targetSdk 34 |
+| Agent run (full loop) | `COMPLETED`; tests, build, secret scan all passed |
+| Export ZIP | 18 entries, 47,372 bytes, no `.env` / `node_modules` / key files |
+
+The agent-authored file was confirmed present in the workspace, not just
+reported: `prod_verify.txt` contains `verified`.
+
+### Credential rotation
+
+During diagnosis a `printenv` dump exposed `DATABASE_URL`, including the
+Postgres password, in this session's transcript. That password was treated as
+compromised and rotated:
+
+1. `ALTER ROLE myaistudio WITH PASSWORD '<new>'` against `masprod-postgres-1`.
+2. `POSTGRES_PASSWORD` and `DATABASE_URL` updated in `.env` (never committed).
+3. Backend recreated with `--force-recreate` and an env stripped of the
+   auto-exported `POSTGRES_PASSWORD`, so compose interpolated from `.env`.
+4. Confirmed by digest comparison and by the backend's TCP probe:
+   `postgres: AVAILABLE`.
+
+The old password is no longer valid over TCP. Any deployment elsewhere that
+still references it will need the new value.
+

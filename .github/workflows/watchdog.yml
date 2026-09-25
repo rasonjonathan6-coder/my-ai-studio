@@ -159,9 +159,15 @@ jobs:
       # sandbox, so a detect-only run costs nothing.
       #
       # This is the real path: no --dry-run. A successful rebuild commits and
-      # pushes the new url.json, and the exit code is passed through unchanged so
-      # a failed recovery or a rejected push fails the step and the job. The
-      # previous version ended in `exit 0`, which reported a broken run as green.
+      # pushes the new url.json.
+      #
+      # The watchdog's own codes are 0 healthy, 2 rebuilt, 1 needs attention. A
+      # rebuilt studio is a successful outcome, but GitHub reads any non-zero step
+      # exit as a failed job, so passing 2 through marked a completed recovery red.
+      # An operator who sees red on every recovery learns to ignore the colour, which
+      # is how a real failure gets missed later. The code is therefore translated for
+      # the job status alone: 0 and 2 succeed, 1 and anything unexpected fail. The
+      # watchdog's code is still published as `exit_code` unchanged.
       - name: Recover when dead
         if: ${{ inputs.mode == 'rebuild' && steps.detect.outputs.exit_code != '0' }}
         id: recover
@@ -182,7 +188,10 @@ jobs:
           code=${PIPESTATUS[0]}
           set -e
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-          exit "$code"
+          if [ "$code" -eq 0 ] || [ "$code" -eq 2 ]; then
+            exit 0
+          fi
+          exit 1
 
       - name: Summarise
         if: always()

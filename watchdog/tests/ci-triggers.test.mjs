@@ -26,6 +26,7 @@
  */
 
 import { strict as assert } from 'node:assert';
+import { spawn } from 'node:child_process';
 import { readFile, readdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -366,14 +367,59 @@ describe('workflow: the recovery path publishes for real', () => {
     assert.doesNotMatch(script, /--plan\b/, 'the recovery step must not run plan-only');
   });
 
-  it('does not mask a failure with an unconditional exit 0', async () => {
+  it('reports a rebuilt studio (exit 2) as a successful job, not a failure', async () => {
+    // The watchdog's codes are 0 healthy, 2 rebuilt, 1 needs attention. A rebuild
+    // that committed and pushed a working url.json is a success, but GitHub reads
+    // any non-zero step exit as a failed job, so a completed recovery used to go
+    // red. Run 36152058679 did exactly that: cycle finished with action "rebuilt",
+    // url.json published, and the job still showed failure. A run that is red for
+    // every recovery trains people to ignore red, which is how a real failure gets
+    // missed. The translation is what this pins.
     const script = await stepScript('Recover when dead');
-    // The script must propagate the watchdog's own code, not overwrite it.
-    assert.match(script, /exit "\$code"/, 'the step reports a failure as success');
-    assert.doesNotMatch(
+
+    // 0 and 2 both leave the step with success.
+    assert.match(
       script,
-      /^\s*exit 0\s*$/m,
-      'the step still ends in an unconditional exit 0',
+      /if \[ "\$code" -eq 0 \] \|\| \[ "\$code" -eq 2 \]; then\s*\n\s*exit 0/,
+      'a rebuilt studio (2) is still reported as a failed job',
+    );
+  });
+
+  it('still fails the job on the watchdog code that means a real error', async () => {
+    // The counterpart of the test above: translating 2 to success must not blunt 1.
+    // Code 1 is a recovery that needs a human - a rejected push, a missing
+    // credential, a build that never started - and it must keep failing the job.
+    const script = await stepScript('Recover when dead');
+    assert.match(
+      script,
+      /\n\s*exit 1\s*$/m,
+      'a real error no longer fails the job',
+    );
+    // And nothing in the step can turn an arbitrary code into success: the only
+    // `exit 0` is the one guarded by the 0-or-2 test.
+    const exits = script
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => /^exit\b/.test(line));
+    assert.deepEqual(
+      exits,
+      ['exit 0', 'exit 1'],
+      `the step decides its status with an unexpected set of exits: ${JSON.stringify(exits)}`,
+    );
+  });
+
+  it('never masks a real error with a blanket success', async () => {
+    const script = await stepScript('Recover when dead');
+    // A bare `exit 0` with no guard in front of it would report every failure -
+    // including a rejected push - as green. The success exit must therefore sit
+    // inside the 0-or-2 guard, never on its own.
+    const lines = script.split('\n');
+    const successAt = lines.findIndex((line) => /^\s*exit 0\s*$/.test(line));
+    assert.notEqual(successAt, -1, 'the step has no success exit at all');
+    assert.match(
+      lines[successAt - 1],
+      /-eq 0 \] \|\| \[ "\$code" -eq 2 \]; then/,
+      'the success exit is not guarded by the condition that defines success',
     );
   });
 
@@ -401,6 +447,68 @@ describe('workflow: the recovery path publishes for real', () => {
     // be reported as a success.
     assert.match(pipeline, /^\s*node\s/, "the exit code captured is not the watchdog's");
   });
+
+  /** Runs a shell snippet, resolving with its exit code. */
+  function shellExit(snippet) {
+    return new Promise((done, fail) => {
+      const child = spawn('bash', ['-c', snippet], { stdio: ['ignore', 'ignore', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', (c) => {
+        stderr += c;
+      });
+      child.on('error', fail);
+      child.on('close', (code) => done({ code, stderr }));
+    });
+  }
+
+  /**
+   * The step's status decision, executed for real.
+   *
+   * The assertions above read the script's text; this one runs the very lines that
+   * decide success or failure, for each of the watchdog's codes, so the mapping is
+   * demonstrated rather than described. The snippet is the tail of the recovery
+   * script - the part after the watchdog has run - with `code` supplied directly,
+   * because the point under test is the translation, not the recovery.
+   */
+  async function stepStatusFor(watchdogCode) {
+    const script = await stepScript('Recover when dead');
+    const lines = script.split('\n');
+    // The decision is everything from the guard to the end of the step: the part
+    // that turns the watchdog's code into the step's own status. Taking it from
+    // the script rather than hardcoding it means these tests fail if the mapping
+    // is edited, which is the regression they exist to catch.
+    const start = lines.findIndex((line) => /if \[ "\$code" -eq 0 \]/.test(line));
+    assert.notEqual(start, -1, 'the step no longer decides its status from $code');
+    const decision = lines
+      .slice(start)
+      .map((line) => line.replace(/\s+$/, ''))
+      .filter((line) => line.trim() !== '')
+      .map((line) => line.trim())
+      .join('\n');
+
+    const { code, stderr } = await shellExit(`code=${watchdogCode}\n${decision}`);
+    assert.equal(stderr, '', `the decision block wrote to stderr: ${stderr}`);
+    return code;
+  }
+
+  it('maps 0, 2 and 1 to the right job status when the decision runs', async () => {
+    // 0 healthy, 2 rebuilt, 1 needs attention. Only 1 is a failure.
+    assert.equal(await stepStatusFor(0), 0, 'a healthy studio must leave the job green');
+    assert.equal(
+      await stepStatusFor(2),
+      0,
+      'a completed rebuild must leave the job green, not red',
+    );
+    assert.equal(await stepStatusFor(1), 1, 'a real error must keep failing the job');
+  });
+
+  it('does not turn an unexpected code into a success', async () => {
+    // Anything the watchdog is not documented to emit is treated as a problem, so a
+    // crash reported as some other code cannot pass for a healthy run.
+    assert.equal(await stepStatusFor(3), 1, 'an undocumented code was reported as success');
+    assert.equal(await stepStatusFor(137), 1, 'a killed run was reported as success');
+  });
+
 
   it('keeps the schedule commented out', async () => {
     // Enabling this lets the recovery, the commit and the push all run

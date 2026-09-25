@@ -21,13 +21,15 @@
 import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, before, describe, it } from 'node:test';
 
 const WATCHDOG = fileURLToPath(new URL('../src/watchdog.mjs', import.meta.url));
+const REPO_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)), '..', '..');
 
 /** Runs a git command and returns its stdout. */
 function gitOutput(cwd, args) {
@@ -353,9 +355,15 @@ describe('watchdog CLI exit codes for a full cycle', () => {
    * only, `dry-run` rebuilds but writes nothing, and `publish` is the real
    * recovery path - no --dry-run - which commits and pushes url.json.
    */
-  async function runCycleCli({ mode = 'rebuild', env = {}, seedState = null, extraArgs = [] } = {}) {
+  async function runCycleCli({
+    mode = 'rebuild',
+    env = {},
+    seedState = null,
+    extraArgs = [],
+    watchdog = WATCHDOG,
+  } = {}) {
     const args = mode === 'plan' ? ['--plan'] : mode === 'publish' ? [] : ['--dry-run'];
-    const child = spawn(process.execPath, [WATCHDOG, ...args, ...extraArgs], {
+    const child = spawn(process.execPath, [watchdog, ...args, ...extraArgs], {
       env: {
         ...process.env,
         URL_JSON_URL: `${apiUrl}/url.json`,
@@ -518,5 +526,98 @@ describe('watchdog CLI exit codes for a full cycle', () => {
     } finally {
       await rm(repo, { recursive: true, force: true });
     }
+  });
+
+  /**
+   * The repository root the publisher computes for itself.
+   *
+   * The recovery once rebuilt a studio successfully and then failed at the publish
+   * step with `Cannot find module .../watchdog/scripts/url-json-update.mjs`:
+   * watchdog.mjs sits in watchdog/src/, so `new URL('..', import.meta.url)` climbed
+   * to watchdog/, not to the repository root. Nothing caught it because every test
+   * passed `--repo-root` explicitly, leaving the default path - the one the workflow
+   * actually uses - unexercised. These tests exercise that default for real: the
+   * watchdog is run from a copy of the tree, without --repo-root, and the publish
+   * step has to locate the real script from its own location alone.
+   */
+  describe('watchdog: the default repository root', () => {
+    it('resolves to the repository root, where the publish script lives', async () => {
+      const { defaultRepoRoot } = await import('../src/watchdog.mjs');
+      const root = defaultRepoRoot();
+
+      assert.equal(
+        root,
+        REPO_ROOT,
+        'the default root no longer points at the repository root; the publisher will not find scripts/url-json-update.mjs',
+      );
+      assert.ok(
+        existsSync(join(root, 'scripts', 'url-json-update.mjs')),
+        'the publish script is not at <root>/scripts/url-json-update.mjs',
+      );
+    });
+
+    it('publishes from the default root when --repo-root is not passed', async () => {
+      const repo = await mkdtemp(join(tmpdir(), 'watchdog-default-root-'));
+      try {
+        // A real copy of the watchdog's own sources. Only src/ and package.json
+        // are copied: the checkout carries a nested .git for the watchdog dir,
+        // and copying it would put a second repository inside the fixture. The
+        // watchdog imports nothing outside node built-ins, so src/ is the whole
+        // dependency surface.
+        await mkdir(join(repo, 'watchdog'), { recursive: true });
+        await cp(join(REPO_ROOT, 'watchdog', 'src'), join(repo, 'watchdog', 'src'), {
+          recursive: true,
+        });
+        await cp(
+          join(REPO_ROOT, 'watchdog', 'package.json'),
+          join(repo, 'watchdog', 'package.json'),
+        );
+        await mkdir(join(repo, 'scripts'), { recursive: true });
+        await cp(
+          join(REPO_ROOT, 'scripts', 'url-json-update.mjs'),
+          join(repo, 'scripts', 'url-json-update.mjs'),
+        );
+        await writeFile(
+          join(repo, 'url.json'),
+          `${JSON.stringify({ schema: 1, service: 'my-ai-studio', url: 'https://old.example', previousUrl: null, updatedAt: '2026-01-01T00:00:00.000Z', status: 'online' }, null, 2)}\n`,
+        );
+        await gitOutput(repo, ['init', '--quiet', '--initial-branch=main']);
+        await gitOutput(repo, ['config', 'user.email', 'watchdog@users.noreply.github.com']);
+        await gitOutput(repo, ['config', 'user.name', 'watchdog']);
+        await gitOutput(repo, ['add', '.']);
+        await gitOutput(repo, ['commit', '--quiet', '-m', 'fixture']);
+
+        const remote = `${repo}-remote.git`;
+        await gitOutput(repo, ['init', '--quiet', '--bare', remote]);
+        await gitOutput(repo, ['remote', 'add', 'origin', remote]);
+        await gitOutput(repo, ['push', '--quiet', 'origin', 'main']);
+
+        studioStarted = false;
+        // No --repo-root: the point is the default. Before the fix this reached
+        // url-json-update.mjs under the wrong parent and exited 1 without ever
+        // writing url.json.
+        const { code, output } = await runCycleCli({
+          mode: 'publish',
+          watchdog: join(repo, 'watchdog', 'src', 'watchdog.mjs'),
+        });
+
+        assert.doesNotMatch(output, /Cannot find module/);
+        assert.match(output, /committed the published url/);
+        assert.match(output, /pushed the published url/);
+        assert.equal(code, 2, `a completed rebuild must exit 2, got ${code}`);
+
+        const written = JSON.parse(await readFile(join(repo, 'url.json'), 'utf8'));
+        assert.equal(written.url, apiUrl, 'url.json was not updated through the default root');
+
+        const changed = await gitOutput(repo, ['show', '--name-only', '--format=', 'HEAD']);
+        assert.deepEqual(changed.trim().split('\n').filter(Boolean), ['url.json']);
+
+        const pushed = await gitOutput(remote, ['log', '--format=%s', 'main']);
+        assert.match(pushed, /chore\(watchdog\): publish studio url /);
+      } finally {
+        await rm(repo, { recursive: true, force: true });
+        await rm(`${repo}-remote.git`, { recursive: true, force: true });
+      }
+    });
   });
 });

@@ -246,6 +246,19 @@ export async function runCycle({
   return { action: 'rebuilt', verdict: health.verdict, url: recovery.publicUrl, previousUrl: url };
 }
 
+/**
+ * The repository root, derived from this file's location.
+ *
+ * This file lives in watchdog/src/, so the root is two levels up. `..` alone
+ * resolved to watchdog/, and the publisher then looked for
+ * watchdog/scripts/url-json-update.mjs, which does not exist: the recovery
+ * rebuilt the studio and then failed at the publish step with MODULE_NOT_FOUND.
+ * Every test passed --repo-root explicitly, so the default was never exercised.
+ */
+export function defaultRepoRoot() {
+  return fileURLToPath(new URL('../..', import.meta.url)).replace(/\/$/, '');
+}
+
 async function main() {
   const { values } = parseArgs({
     options: {
@@ -275,7 +288,7 @@ async function main() {
   }
 
   const settings = loadSettings();
-  const repoRoot = values['repo-root'] || new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+  const repoRoot = values['repo-root'] || defaultRepoRoot();
 
   const result = await runCycle({
     settings,

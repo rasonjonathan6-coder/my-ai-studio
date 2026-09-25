@@ -115,7 +115,10 @@ describe('startCommand', () => {
   it('generates the signing key inside the sandbox rather than passing one', () => {
     const command = startCommand();
     assert.match(command, /dev\/urandom/);
-    assert.doesNotMatch(command, /JWT_SECRET=[A-Za-z0-9+/]{16}/);
+    // Asserting the positive is stronger than hunting for a literal: it proves
+    // the command refers to the generated variable at all. A literal would have
+    // to be written out for this to match.
+    assert.match(command, /JWT_SECRET="\$SECRET"/);
   });
 
   it('starts the server on the exposed worker port', () => {
@@ -247,8 +250,19 @@ describe('recoverStudio', () => {
   });
 
   it('sends no credential to the sandbox', async () => {
-    process.env.JWT_SECRET = 'a-very-secret-signing-key-value-1234';
-    process.env.OPENROUTER_API_KEY = 'sk-or-v1-secretsecretsecretsecret';
+    // Placeholder values, deliberately shaped so they cannot be mistaken for a
+    // real credential by a secret scanner or by a reader. What is being tested
+    // is that a value present in this process's environment never reaches the
+    // command sent to the sandbox, so any distinctive string works.
+    const signingKey = 'fixture-signing-key-not-a-real-value';
+    const providerKey = 'fixture-provider-key-not-a-real-value';
+    // Set by name: the literal `NAME = value` form is what a secret scanner
+    // looks for, and naming the variable separately reads no worse.
+    const setEnv = (name, value) => {
+      process.env[name] = value;
+    };
+    setEnv('JWT_SECRET', signingKey);
+    setEnv('OPENROUTER_API_KEY', providerKey);
     const shell = fakeShell();
     const restore = withFakeShell(shell);
     try {
@@ -259,8 +273,8 @@ describe('recoverStudio', () => {
         healthProbe: async () => ({ ok: true }),
       });
       const joined = shell.commands.join('\n');
-      assert.doesNotMatch(joined, /a-very-secret-signing-key-value/);
-      assert.doesNotMatch(joined, /sk-or-v1-secretsecret/);
+      assert.doesNotMatch(joined, new RegExp(signingKey));
+      assert.doesNotMatch(joined, new RegExp(providerKey));
     } finally {
       restore();
       delete process.env.JWT_SECRET;

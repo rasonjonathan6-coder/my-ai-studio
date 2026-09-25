@@ -134,12 +134,19 @@ jobs:
           echo "APK FOUND: $apk ($size bytes)"
 
       - name: Package APK with build metadata
+        # The APK path from the locate step is relative to the project directory,
+        # so this step must run from there too or the copy fails. The artifact
+        # directory is anchored to the workspace root so it does not depend on how
+        # deep the project sits.
+        working-directory: ${{ steps.project.outputs.dir }}
         run: |
           set -e
-          mkdir -p apk-artifact
+          out="$GITHUB_WORKSPACE/apk-artifact"
+          rm -rf "$out"
+          mkdir -p "$out"
           apk="${{ steps.apk.outputs.path }}"
-          cp "$apk" apk-artifact/app-debug.apk
-          ( cd apk-artifact && sha256sum ./app-debug.apk > SHA256SUMS.txt )
+          cp "$apk" "$out/app-debug.apk"
+          ( cd "$out" && sha256sum ./app-debug.apk > SHA256SUMS.txt )
           {
             echo "commit: ${{ github.sha }}"
             echo "branch: ${{ github.ref_name }}"
@@ -151,10 +158,10 @@ jobs:
             echo "apk: app-debug.apk"
             echo "size_bytes: ${{ steps.apk.outputs.size }}"
             echo "sha256: ${{ steps.apk.outputs.sha256 }}"
-          } > apk-artifact/BUILD_INFO.txt
-          cat apk-artifact/BUILD_INFO.txt
+          } > "$out/BUILD_INFO.txt"
+          cat "$out/BUILD_INFO.txt"
           # The artifact must never carry a secret.
-          if grep -rIlE 'sk-or-[A-Za-z0-9]|OPENROUTER_API_KEY|api_key=|apikey=|password=|private_key|secret=' apk-artifact; then
+          if grep -rIlE 'sk-or-[A-Za-z0-9]|OPENROUTER_API_KEY|api_key=|apikey=|password=|private_key|secret=' "$out"; then
             echo "SECURITY FAILED: secret-like content in the APK artifact"
             exit 1
           fi

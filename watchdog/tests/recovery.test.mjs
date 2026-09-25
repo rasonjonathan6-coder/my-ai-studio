@@ -28,6 +28,7 @@ import {
 import { OpenHandsClient, SandboxShell, ApiError, WORKER_PORTS } from '../src/openhandsClient.mjs';
 import { VERDICT } from '../src/discovery.mjs';
 import { runCycle } from '../src/watchdog.mjs';
+import { ISOLATION_CANARY, LAUNCH_MARKERS, makeLaunchFixture, runLaunchIsolated } from './helpers.mjs';
 
 const SANDBOX = {
   id: 'sb-test',
@@ -172,18 +173,98 @@ describe('startCommand', () => {
     assert.doesNotMatch(command, /JWT_SECRET=/);
   });
 
-  it('still names the port and the host-execution opt-in when provisioned', () => {
+  it('still names the port and the environment when provisioned', () => {
     const command = startCommand({ useEnvFile: true });
     assert.match(command, /PORT=12000/);
     assert.match(command, /NODE_ENV=production/);
-    // Set in the environment rather than the file: it configures this host, not the app.
-    assert.match(command, /NODE_OPTIONS="--env-file=\/tmp\/studio\.env"/);
+  });
+
+  it('passes --env-file to node as a direct argument', () => {
+    const command = startCommand({ useEnvFile: true });
+    // The flag has to sit between `node` and the script. Anywhere else and node
+    // either treats it as an argument to the script or rejects it outright.
+    assert.match(command, /node --env-file=\/tmp\/studio\.env backend\/dist\/server\.js/);
+  });
+
+  it('never puts --env-file in NODE_OPTIONS', () => {
+    // Node refuses that flag in NODE_OPTIONS and exits before listening:
+    //   node: --env-file= is not allowed in NODE_OPTIONS
+    // A launch built that way looks correct in the command string and yields a
+    // studio that starts, logs that one line and dies. Asserting the absence here
+    // is what turns a silent production failure into a test failure.
+    const command = startCommand({ useEnvFile: true });
+    assert.doesNotMatch(command, /NODE_OPTIONS/);
   });
 
   it('keeps a launch that chains its steps when provisioned', () => {
     const command = startCommand({ useEnvFile: true });
     assert.match(command, /&&/);
     assert.match(command, /&\)/);
+  });
+});
+
+describe('the launch actually starts a process', () => {
+  /**
+   * These run the command `startCommand` builds, against a stand-in for the server
+   * entry. Asserting on the command string alone is what let the previous launch
+   * through: it read correctly, and node refused it before the studio ever listened.
+   */
+
+  it('starts without error and reports the port it was given', () => {
+    const fixture = makeLaunchFixture();
+    try {
+      const result = runLaunchIsolated(startCommand({ useEnvFile: true }), fixture);
+      assert.equal(result.status, 0, `launch exited ${result.status}: ${result.stderr}`);
+      assert.doesNotMatch(result.stderr, /is not allowed in NODE_OPTIONS/);
+      assert.match(result.stdout, /"PORT":"12000"/);
+      // A missing canary is what proves the launch ran with nothing else in its
+      // environment. Without this the checks below could pass on an environment that
+      // merely happens to lack the configured names, which is what CI is.
+      assert.equal(JSON.parse(result.stdout)[ISOLATION_CANARY], null, 'the launch was not isolated');
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it('reads every configured name from the environment file', () => {
+    const fixture = makeLaunchFixture();
+    try {
+      const result = runLaunchIsolated(startCommand({ useEnvFile: true }), fixture);
+      assert.equal(result.status, 0, `launch exited ${result.status}: ${result.stderr}`);
+
+      const seen = JSON.parse(result.stdout);
+      for (const [name, value] of Object.entries(LAUNCH_MARKERS)) {
+        // Equality against the marker, not a truthiness check: a name that leaked in
+        // from the surrounding environment would otherwise satisfy the assertion.
+        assert.equal(seen[name], value, `${name} did not come from the environment file`);
+      }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it('does not let an inherited name mask the environment file', () => {
+    // The behaviour being pinned: --env-file leaves a name that is already defined
+    // alone. Running the launch inside the suite's own environment would therefore
+    // read that environment, and the file would be ignored without any warning. The
+    // launch is isolated so the file is the only source, exactly as in a fresh
+    // sandbox - and this test states the masking rule rather than assuming it.
+    const fixture = makeLaunchFixture();
+    try {
+      const masked = runLaunchIsolated(startCommand({ useEnvFile: true }), {
+        ...fixture,
+        withEnv: { DATABASE_URL: 'inherited-value' },
+      });
+      assert.equal(masked.status, 0, `launch exited ${masked.status}: ${masked.stderr}`);
+
+      const seen = JSON.parse(masked.stdout);
+      assert.equal(seen.DATABASE_URL, 'inherited-value', 'an inherited name did not take precedence');
+      // The names that were not injected still come from the file, which is why the
+      // isolation matters for the rest of the suite and not for this assertion.
+      assert.equal(seen.OPENROUTER_API_KEY, LAUNCH_MARKERS.OPENROUTER_API_KEY);
+    } finally {
+      fixture.cleanup();
+    }
   });
 });
 
@@ -560,8 +641,10 @@ describe('provisioning the runtime environment', () => {
       assert.doesNotMatch(joined, /fixturepassword/);
       assert.doesNotMatch(joined, /fixture-provider-key-not-a-real-value/);
       assert.doesNotMatch(joined, /fixture-signing-key-not-a-real-value/);
-      // The launch points at the file.
-      assert.match(joined, /--env-file=\/tmp\/studio\.env/);
+      // The launch points at the file, as a node argument. Matching loosely here
+      // would accept the NODE_OPTIONS form, which is the one node rejects.
+      assert.match(joined, /node --env-file=\/tmp\/studio\.env backend\/dist\/server\.js/);
+      assert.doesNotMatch(joined, /NODE_OPTIONS/);
       // And the signing key was not regenerated, because one was supplied.
       assert.doesNotMatch(joined, /dev\/urandom/);
 

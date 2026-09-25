@@ -26,6 +26,7 @@ import { log } from './log.mjs';
 const REPO_URL = process.env.WATCHDOG_REPO_URL || 'https://github.com/rasonjonathan6-coder/my-ai-studio.git';
 const REPO_BRANCH = process.env.WATCHDOG_REPO_BRANCH || 'main';
 const WORK_DIR = '/workspace/project';
+const SERVER_ENTRY = 'backend/dist/server.js';
 const PORT = WORKER_PORTS.WORKER_1;
 
 export class RecoveryError extends Error {
@@ -131,10 +132,13 @@ export function startCommand({ port = PORT, logFile = '/tmp/my-ai-studio.log', u
   // subshell so the command returns immediately instead of waiting on the
   // server.
   const settings = [`PORT=${port}`, `NODE_ENV=production`];
+  let nodeArgs = [];
   if (useEnvFile) {
-    // NODE_OPTIONS rather than a positional flag, so a node whose CLI rejects
-    // --env-file still starts: the option is ignored instead of killing the launch.
-    settings.push(`NODE_OPTIONS="--env-file=${envFile}"`);
+    // `--env-file` is passed to node directly, not through NODE_OPTIONS: node
+    // refuses that flag there ("--env-file= is not allowed in NODE_OPTIONS") and
+    // exits before listening. Positioning it before the script keeps it a node
+    // option rather than an argument to the script.
+    nodeArgs = [`--env-file=${envFile}`];
   } else {
     settings.push(
       `JWT_SECRET="$SECRET"`,
@@ -147,7 +151,7 @@ export function startCommand({ port = PORT, logFile = '/tmp/my-ai-studio.log', u
     `cd ${WORK_DIR}`,
     `rm -f ${logFile}`,
     useEnvFile ? ': skip signing key, it comes from the environment file' : `SECRET=$(head -c 48 /dev/urandom | base64 | tr -d '\\n')`,
-    `(nohup env ${settings.join(' ')} node backend/dist/server.js > ${logFile} 2>&1 &)`,
+    `(nohup env ${settings.join(' ')} node ${[...nodeArgs, SERVER_ENTRY].join(' ')} > ${logFile} 2>&1 &)`,
     `echo LAUNCHED`,
   ].join(' && ');
 }

@@ -369,6 +369,16 @@ describe('two consecutive runs share one budget', () => {
         return json(200, { ok: true, service: 'my-ai-studio', version: '1.0.0' });
       }
       if (url.pathname === '/api/v1/users/me') return json(200, { id: 'fixture-user' });
+      const sandboxInfo = (id) => ({
+        id,
+        status: 'RUNNING',
+        session_api_key: 'fixture-session-key-not-a-real-value',
+        exposed_urls: [
+          { name: 'AGENT_SERVER', port: 60000, url: apiUrl },
+          { name: 'WORKER_1', port: 12000, url: apiUrl },
+        ],
+      });
+
       if (url.pathname === '/api/v1/sandboxes' && req.method === 'POST') {
         const id = `sb-run-${sandboxesCreated.length + 1}`;
         sandboxesCreated.push(id);
@@ -383,18 +393,17 @@ describe('two consecutive runs share one budget', () => {
           ],
         });
       }
+      // getSandbox reads one sandbox through the id endpoint. Search paginates,
+      // so answering only there let a sandbox look absent once an account held
+      // more than a page of them. Both routes are kept so the harness still
+      // matches the API surface.
+      if (url.pathname === '/api/v1/sandboxes' && req.method === 'GET') {
+        const wanted = url.searchParams.get('id');
+        return json(200, sandboxesCreated.includes(wanted) ? [sandboxInfo(wanted)] : [null]);
+      }
+
       if (url.pathname === '/api/v1/sandboxes/search') {
-        return json(200, {
-          items: sandboxesCreated.map((id) => ({
-            id,
-            status: 'RUNNING',
-            session_api_key: 'fixture-session-key-not-a-real-value',
-            exposed_urls: [
-              { name: 'AGENT_SERVER', port: 60000, url: apiUrl },
-              { name: 'WORKER_1', port: 12000, url: apiUrl },
-            ],
-          })),
-        });
+        return json(200, { items: sandboxesCreated.map((id) => sandboxInfo(id)) });
       }
       if (url.pathname.startsWith('/api/v1/sandboxes/') && req.method === 'DELETE') {
         return json(200, { success: true });

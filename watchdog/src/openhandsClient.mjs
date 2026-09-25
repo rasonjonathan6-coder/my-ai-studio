@@ -24,6 +24,15 @@ export const APP_SERVER = process.env.OPENHANDS_BASE_URL || 'https://app.all-han
 
 export const WORKER_PORTS = { WORKER_1: 12000, WORKER_2: 12001 };
 
+/**
+ * Statuses from which a sandbox never reaches RUNNING.
+ *
+ * `ERROR` is an unrecoverable failure and `MISSING` means the sandbox was reaped
+ * before it ever ran. Both are terminal: polling them until the timeout expires
+ * only delays a failure that is already certain.
+ */
+const TERMINAL_SANDBOX_STATUSES = new Set(['ERROR', 'MISSING']);
+
 export class ApiError extends Error {
   constructor(message, { status, detail } = {}) {
     super(message);
@@ -100,9 +109,20 @@ export class OpenHandsClient {
     return Array.isArray(page?.items) ? page.items : [];
   }
 
+  /**
+   * Reads one sandbox by id.
+   *
+   * Uses the dedicated batch-get endpoint rather than scanning a page of search
+   * results. Search paginates (limit <= 100, newest first), so once an account
+   * holds more sandboxes than one page, the one being waited on can fall off the
+   * end: `getSandbox` would answer null, the caller would keep polling the stale
+   * object it already had, and the sandbox would time out despite being fine. The
+   * id endpoint answers with the sandbox itself, or null when it is gone.
+   */
   async getSandbox(id) {
-    const items = await this.listSandboxes(50);
-    return items.find((item) => item.id === id) ?? null;
+    const result = await this.request(`/api/v1/sandboxes?id=${encodeURIComponent(id)}`);
+    const found = Array.isArray(result) ? result[0] : result;
+    return found ?? null;
   }
 
   /**
@@ -116,20 +136,44 @@ export class OpenHandsClient {
     if (!id) throw new ApiError('sandbox creation returned no id', { detail: created });
     log.info('sandbox created', { sandboxId: id, status: created.status });
 
-    const deadline = Date.now() + timeoutMs;
-    let last = created;
-    while (Date.now() < deadline) {
-      last = (await this.getSandbox(id)) ?? last;
-      if (onPoll) onPoll(last);
-      if (last.status === 'RUNNING') return last;
-      if (last.status === 'ERROR') {
-        throw new ApiError(`sandbox ${id} entered ERROR`, { detail: last.status_detail });
+    try {
+      const deadline = Date.now() + timeoutMs;
+      let last = created;
+      while (Date.now() < deadline) {
+        last = (await this.getSandbox(id)) ?? last;
+        if (onPoll) onPoll(last);
+        if (last.status === 'RUNNING') return last;
+        if (TERMINAL_SANDBOX_STATUSES.has(last.status)) {
+          throw new ApiError(`sandbox ${id} entered ${last.status}`, {
+            detail: last.status_detail,
+          });
+        }
+        await new Promise((r) => setTimeout(r, pollIntervalMs));
       }
-      await new Promise((r) => setTimeout(r, pollIntervalMs));
+      throw new ApiError(`sandbox ${id} did not reach RUNNING within ${timeoutMs}ms`, {
+        // A stalled sandbox is usually a scheduling problem on the platform, and
+        // status_detail is where the platform says which one. Reporting only
+        // "STARTING" leaves the operator with nothing to act on.
+        detail: { status: last?.status ?? null, status_detail: last?.status_detail ?? null },
+      });
+    } catch (err) {
+      // A sandbox that never reached RUNNING still occupies a slot and will never
+      // be used. This call is the only owner of its id, and the caller never
+      // receives that id when the wait fails, so it cannot clean up after us:
+      // discarding it here is the only chance to. The delete is best-effort and
+      // must not replace the original error - what the operator needs to see is
+      // why the sandbox never started, not that tidying it up failed.
+      try {
+        await this.deleteSandbox(id);
+        log.warn('discarded stalled sandbox', { sandboxId: id });
+      } catch (cleanupErr) {
+        log.error('could not discard stalled sandbox', {
+          sandboxId: id,
+          error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+        });
+      }
+      throw err;
     }
-    throw new ApiError(`sandbox ${id} did not reach RUNNING within ${timeoutMs}ms`, {
-      detail: last?.status,
-    });
   }
 
   async deleteSandbox(id) {

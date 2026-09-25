@@ -250,6 +250,17 @@ describe('watchdog CLI exit codes for a full cycle', () => {
   let studioStarted;
 
   async function startFakeApi() {
+    /** The sandbox shape the API returns once one is usable. */
+    const sandboxInfo = (id) => ({
+      id,
+      status: 'RUNNING',
+      session_api_key: 'fixture-session-key-not-a-real-value',
+      exposed_urls: [
+        { name: 'AGENT_SERVER', port: 60000, url: apiUrl },
+        { name: 'WORKER_1', port: 12000, url: apiUrl },
+      ],
+    });
+
     const server = createServer((req, res) => {
       const url = new URL(req.url, 'http://127.0.0.1');
       const json = (status, body) => {
@@ -292,20 +303,18 @@ describe('watchdog CLI exit codes for a full cycle', () => {
         });
       }
 
+      // The id endpoint is what getSandbox uses to read one sandbox back: search
+      // paginates, so a sandbox could fall off the end of a page and look absent.
+      // Both routes are served so the harness matches the real API, and the id
+      // route honours the requested id rather than always answering SANDBOX_ID.
+      if (url.pathname === '/api/v1/sandboxes' && req.method === 'GET') {
+        const wanted = url.searchParams.get('id');
+        const found = wanted === SANDBOX_ID ? [sandboxInfo(wanted)] : [null];
+        return json(200, found);
+      }
+
       if (url.pathname === '/api/v1/sandboxes/search') {
-        return json(200, {
-          items: [
-            {
-              id: SANDBOX_ID,
-              status: 'RUNNING',
-              session_api_key: 'fixture-session-key-not-a-real-value',
-              exposed_urls: [
-                { name: 'AGENT_SERVER', port: 60000, url: apiUrl },
-                { name: 'WORKER_1', port: 12000, url: apiUrl },
-              ],
-            },
-          ],
-        });
+        return json(200, { items: [sandboxInfo(SANDBOX_ID)] });
       }
 
       if (url.pathname.startsWith('/api/v1/sandboxes/') && req.method === 'DELETE') {

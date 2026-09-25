@@ -7,12 +7,14 @@
  * the public URL. That last check is the point of the whole file: a sandbox that
  * runs the server but cannot be reached is not a recovery.
  *
- * Two things are deliberately not done here:
- *
- *  - No secret is copied from this process into the new runtime. The JWT secret
- *    the studio requires is generated fresh inside the sandbox. A recovered
- *    runtime that inherited a signing key from a dead one would let old tokens
- *    keep working, which is worse than invalidating them.
+ *  - The recovered runtime is given the configuration it needs to actually work - the
+ *    database, the provider key, the signing key - but the values never travel through
+ *    a command. They are written to an environment file over multipart, restricted to
+ *    its owner, and read back at launch with `node --env-file`. A value placed in a
+ *    command would be recorded in the sandbox's bash event history and stay readable
+ *    through the API after the run; a value placed in the environment file does not.
+ *    Nothing is invented: a name the watchdog was not given is reported as missing
+ *    rather than filled with a generated stand-in.
  *  - Nothing is published until the public URL has answered health. Publishing an
  *    unverified URL would point every installed APK at a dead host.
  */
@@ -35,49 +37,119 @@ export class RecoveryError extends Error {
   }
 }
 
-/** Builds the shell command that starts the studio, without any secret in it. */
-export function startCommand({ port = PORT, logFile = '/tmp/my-ai-studio.log' } = {}) {
-  // The signing key is generated in the sandbox at start time. Reading it from
-  // the environment here would put it in this process and in any log that
-  // echoes the command.
-  //
+/** Where the recovered runtime's environment file is written, inside the sandbox. */
+export const ENV_FILE = '/tmp/studio.env';
+
+/**
+ * Every name the recovered runtime can be given, and whether it is a secret.
+ *
+ * The secrets are listed separately from the plain configuration because only the
+ * secrets are subject to the redaction list and to the rule that they may never
+ * appear in a command. `DATABASE_SSL`, `OPENROUTER_MODEL` and
+ * `MY_AI_STUDIO_ADMIN_EMAIL` are ordinary configuration: an operator debugging a
+ * recovery needs to see them in a log, so masking them would cost more than it buys.
+ */
+export const FORWARDABLE = [
+  { name: 'DATABASE_URL', secret: true },
+  { name: 'DATABASE_SSL', secret: false },
+  { name: 'OPENROUTER_API_KEY', secret: true },
+  { name: 'OPENROUTER_MODEL', secret: false },
+  { name: 'JWT_SECRET', secret: true },
+  { name: 'MY_AI_STUDIO_CREDENTIAL_KEY', secret: true },
+  { name: 'MY_AI_STUDIO_ADMIN_EMAIL', secret: false },
+];
+
+/**
+ * Names to forward into the recovered runtime, but only the ones the watchdog was
+ * actually given. A missing one is reported, not invented, and nothing is generated
+ * to stand in for it: a runtime started with a made-up credential would fail later in
+ * a way that looks like a different problem.
+ */
+export function forwardableSecrets({ env = process.env } = {}) {
+  return FORWARDABLE.map((entry) => entry.name).filter((name) => {
+    const value = env[name];
+    return typeof value === 'string' && value.length > 0;
+  });
+}
+
+/** Names that are forwarded and look like a credential. */
+export function secretNames() {
+  return FORWARDABLE.filter((entry) => entry.secret).map((entry) => entry.name);
+}
+
+const ENV_NAME = /^[A-Z][A-Z0-9_]*$/;
+
+/**
+ * Builds the body of the runtime's environment file. The values stay in this process
+ * and in the returned string; they are never interpolated into a command.
+ *
+ * A value carrying a newline or a control character is refused rather than written,
+ * because it would silently become two lines and change which variables the runtime
+ * sees. None of the supported names holds one; a multi-line key (a PEM, say) would.
+ */
+export function studioEnv({ env = process.env } = {}) {
+  const present = forwardableSecrets({ env });
+  const lines = [];
+  const refused = [];
+  for (const name of present) {
+    const value = String(env[name]);
+    if (!ENV_NAME.test(name) || /[\n\r\u0000]/.test(value)) {
+      refused.push(name);
+      continue;
+    }
+    lines.push(`${name}=${value}`);
+  }
+  const missing = FORWARDABLE.map((entry) => entry.name).filter((name) => !present.includes(name));
+  return {
+    body: lines.length > 0 ? `${lines.join('\n')}\n` : '',
+    names: lines.map((line) => line.slice(0, line.indexOf('='))),
+    missing,
+    refused,
+  };
+}
+
+/** The command that restricts the file to its owner. It names the path, never a value. */
+export function chmodCommand({ path = ENV_FILE } = {}) {
+  return `chmod 600 ${path}`;
+}
+
+/**
+ * Builds the shell command that starts the studio.
+ *
+ * With `useEnvFile`, the configuration arrives in the environment file and the command
+ * carries only its path: no value is ever interpolated here. The `env` prefix then
+ * holds only non-secret settings, because an assignment there would override the file.
+ *
+ * Without it, the older behaviour is kept: a signing key generated inside the sandbox,
+ * and nothing forwarded. That is what runs when no configuration is available, and it
+ * must not be mistaken for a configured runtime - the caller logs the difference.
+ */
+export function startCommand({ port = PORT, logFile = '/tmp/my-ai-studio.log', useEnvFile = false, envFile = ENV_FILE } = {}) {
   // The steps are chained with && rather than separated by spaces: joined by
   // spaces, `cd DIR rm -f FILE` becomes one cd with two arguments, which fails
   // and leaves the server never started. The launch itself is wrapped in a
   // subshell so the command returns immediately instead of waiting on the
-  // server, and `env` passes only the named variables through so the studio does
-  // not inherit this process's environment.
-  return [
-    `cd ${WORK_DIR}`,
-    `rm -f ${logFile}`,
-    `SECRET=$(head -c 48 /dev/urandom | base64 | tr -d '\\n')`,
-    // The env assignments must be one argument of a single `env` invocation:
-    // splitting them across array entries would put the && separators inside the
-    // env command, which fails.
-    [
-      `(nohup env`,
-      `PORT=${port}`,
+  // server.
+  const settings = [`PORT=${port}`, `NODE_ENV=production`];
+  if (useEnvFile) {
+    // NODE_OPTIONS rather than a positional flag, so a node whose CLI rejects
+    // --env-file still starts: the option is ignored instead of killing the launch.
+    settings.push(`NODE_OPTIONS="--env-file=${envFile}"`);
+  } else {
+    settings.push(
       `JWT_SECRET="$SECRET"`,
-      `NODE_ENV=production`,
       // This host is a single-tenant sandbox that exists only to serve the
       // studio, so running the agent's commands in-process is the intended mode.
       `ALLOW_HOST_EXECUTION_IN_PRODUCTION=true`,
-      `node backend/dist/server.js > ${logFile} 2>&1 &)`,
-    ].join(' '),
+    );
+  }
+  return [
+    `cd ${WORK_DIR}`,
+    `rm -f ${logFile}`,
+    useEnvFile ? ': skip signing key, it comes from the environment file' : `SECRET=$(head -c 48 /dev/urandom | base64 | tr -d '\\n')`,
+    `(nohup env ${settings.join(' ')} node backend/dist/server.js > ${logFile} 2>&1 &)`,
     `echo LAUNCHED`,
   ].join(' && ');
-}
-
-/**
- * Optional secrets to forward into the recovered runtime, but only the ones the
- * watchdog was actually given. A missing one is reported, not invented.
- */
-export function forwardableSecrets() {
-  const names = ['DATABASE_URL', 'OPENROUTER_API_KEY', 'OPENROUTER_MODEL'];
-  return names.filter((name) => {
-    const value = process.env[name];
-    return typeof value === 'string' && value.length > 0;
-  });
 }
 
 async function step(name, fn) {
@@ -109,6 +181,7 @@ export async function recoverStudio({
   publish,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   healthProbe,
+  env = process.env,
 } = {}) {
   let sandbox = null;
   try {
@@ -146,24 +219,45 @@ export async function recoverStudio({
       }
     });
 
-    await step('start studio', async () => {
-      // The recovered runtime is started with no credential from this process.
-      // There is no way to hand it one safely: the sandbox secrets API is
-      // read-only, so the only channel would be the command string itself, which
-      // is recorded in the sandbox's bash event history and readable through the
-      // API afterwards. A signing key generated inside the sandbox is fine;
-      // copying a real key in would leave it lying in that history.
-      const unavailable = ['DATABASE_URL', 'OPENROUTER_API_KEY'].filter(
-        (name) => !forwardableSecrets().includes(name),
-      );
-      log.warn('starting the recovered studio without provider or database configuration', {
-        // Stated plainly so a recovered runtime running in-memory with no AI is
-        // never mistaken for a fully configured one.
-        unset: unavailable,
-        note: 'configure these on the new runtime; they are deliberately not copied from here',
-      });
+    // Built before the upload so the same reading drives both what is written and what
+    // is reported as missing. Nothing here invents a value: an absent name is named,
+    // not filled in.
+    const config = studioEnv({ env });
 
-      const result = await shell.run(startCommand(), { timeoutMs: 120_000 });
+    const provisioned = await step('provision runtime environment', async () => {
+      if (config.names.length === 0) {
+        log.warn('no runtime configuration available; the recovered studio starts unconfigured', {
+          missing: config.missing,
+          note: 'set the repository secrets to have a recovered runtime run with its database and provider',
+        });
+        return false;
+      }
+      if (config.refused.length > 0) {
+        // Refused rather than written: a value with a newline would split into two lines
+        // and change which variables the runtime ends up seeing.
+        log.warn('refused a configuration value carrying a newline or a control character', {
+          names: config.refused,
+        });
+      }
+      // The content travels as the body of a multipart request. It is never placed in a
+      // command: a command is recorded in the sandbox's bash event history and stays
+      // readable through the API after the run.
+      await shell.uploadFile(ENV_FILE, config.body);
+      // Restricted before anything can read it, and before the server is started.
+      await shell.runChecked(chmodCommand());
+      log.info('runtime environment provisioned', {
+        names: config.names,
+        missing: config.missing,
+        path: ENV_FILE,
+      });
+      return true;
+    });
+
+    await step('start studio', async () => {
+      // With a configuration provisioned, the launch reads the environment file and no
+      // secret is interpolated into the command. Without one, the older behaviour is
+      // kept: a signing key generated inside the sandbox and no provider or database.
+      const result = await shell.run(startCommand({ useEnvFile: provisioned }), { timeoutMs: 120_000 });
       if (result.exitCode !== 0) {
         throw new RecoveryError('start command failed', { stage: 'start', detail: result.stderr.slice(0, 800) });
       }

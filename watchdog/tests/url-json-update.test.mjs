@@ -24,6 +24,8 @@
 
 import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
+
+import { withoutForwardableNames } from './helpers.mjs';
 import { createServer } from 'node:http';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -91,7 +93,7 @@ function runPublisher(root, ...args) {
   return new Promise((done, fail) => {
     const child = spawn(process.execPath, [join(root, 'scripts', 'url-json-update.mjs'), ...args], {
       env: {
-        ...process.env,
+        ...withoutForwardableNames(process.env),
         // Both are alternative URL sources in the script and both are set in
         // this environment. Cleared so a test that passes no --url is testing
         // the missing-URL path rather than the operator's shell.
@@ -346,7 +348,7 @@ describe('url-json-update: no credential can reach the output', () => {
     const root = await isolatedCopy();
     const child = await new Promise((done, fail) => {
       const proc = spawn(process.execPath, [join(root, 'scripts', 'url-json-update.mjs'), '--url', studio.url], {
-        env: { ...process.env, ...fixtures, MY_AI_STUDIO_DOMAIN: '', URL_JSON_URL: '' },
+        env: { ...withoutForwardableNames(process.env), ...fixtures, MY_AI_STUDIO_DOMAIN: '', URL_JSON_URL: '' },
       });
       let stdout = '';
       let stderr = '';

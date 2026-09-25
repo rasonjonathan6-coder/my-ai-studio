@@ -25,6 +25,8 @@
 
 import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
+
+import { withoutForwardableNames } from './helpers.mjs';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -341,6 +343,9 @@ describe('two consecutive runs share one budget', () => {
 
   async function startFakeApi() {
     const sandboxesCreated = [];
+    // Contents the watchdog uploaded, so a test can show the configuration travelled
+    // as a request body rather than inside a command.
+    const uploads = [];
     // The recovery verifies the sandbox URL from outside, and the working
     // sandbox serves the same address, so this request must succeed once a
     // sandbox exists. Detection, which runs first, must see it as dead.
@@ -408,6 +413,20 @@ describe('two consecutive runs share one budget', () => {
       if (url.pathname.startsWith('/api/v1/sandboxes/') && req.method === 'DELETE') {
         return json(200, { success: true });
       }
+      if (url.pathname === '/api/file/upload') {
+        // The runtime configuration arrives as a multipart body, never as a command.
+        // Served here so the harness matches the real API surface; the body is kept
+        // only so a test can prove the content travelled this way.
+        let raw = '';
+        req.on('data', (c) => {
+          raw += c;
+        });
+        req.on('end', () => {
+          uploads.push({ path: url.searchParams.get('path'), body: raw });
+          json(200, { ok: true });
+        });
+        return undefined;
+      }
       if (url.pathname === '/api/bash/execute_bash_command') {
         let raw = '';
         req.on('data', (c) => {
@@ -446,7 +465,11 @@ describe('two consecutive runs share one budget', () => {
   function runOnce(statePath, extraEnv = {}) {
     const child = spawn(process.execPath, [WATCHDOG, '--dry-run'], {
       env: {
-        ...process.env,
+        // Names the watchdog could forward are cleared, so the run under test sees the
+        // same environment on a developer's machine as in CI. Without this, a
+        // developer's own configuration would be provisioned into the fake sandbox and
+        // change what these tests exercise.
+        ...withoutForwardableNames(process.env),
         URL_JSON_URL: `${apiUrl}/url.json`,
         OPENHANDS_BASE_URL: apiUrl,
         OPENHANDS_API_KEY: 'fixture-openhands-key-not-a-real-value',

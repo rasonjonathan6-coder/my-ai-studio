@@ -133,6 +133,10 @@ describe('redaction on the publication path', () => {
     OPENHANDS_API_KEY: `sk-oh-${'Z'.repeat(24)}`,
     GITHUB_TOKEN: `ghp_${'Q'.repeat(30)}`,
     DATABASE_URL: 'postgres://publishinguser:publishingpassword@db.example:5432/studio',
+    // Carried by the same path since a recovered runtime is given the configuration it
+    // needs. It is not a provider key, so no shape pattern catches it: only the literal
+    // list does, which is what this entry pins.
+    MY_AI_STUDIO_CREDENTIAL_KEY: `fixture-credential-key-${'abcdef12'.repeat(3)}`,
   };
 
   /** Runs a callback with stdout and stderr captured. */

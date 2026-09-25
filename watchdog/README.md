@@ -116,17 +116,41 @@ rebuild will fix - a GitHub outage, a missing configuration - would otherwise
 consume the sandbox quota until nothing is left. The daily budget stops that and
 makes the failure visible in the log instead.
 
-## What a recovered runtime does and does not get
+## What a recovered runtime gets
 
-It gets the repository from GitHub, a fresh build, and a signing key generated
-inside the sandbox. It does **not** inherit any credential from this process.
+It gets the repository from GitHub, a fresh build, and the configuration it needs to
+actually work: the database it should connect to, the provider key for the agent, and a
+signing key. See the [runtime configuration](#runtime-configuration) section for the
+names.
 
-That is deliberate, and it is worth being precise about why. The sandbox secrets
-API is read-only, so the only way to hand the runtime a real key would be the
-command string itself, which is recorded in the sandbox's bash event history and
-readable through the API afterwards. Copying a key in would leave it lying there.
-A recovered runtime therefore starts with `DATABASE_URL` and `OPENROUTER_API_KEY`
-unset, logs say so plainly, and those have to be configured on the new runtime.
+The values never travel through a command. They are written to `/tmp/studio.env` inside
+the sandbox as the body of a multipart request, restricted with `chmod 600`, and read
+back at launch with `node --env-file`. This matters because a command is recorded in the
+sandbox's bash event history and stays readable through the API afterwards, so a key
+placed in one would be left lying there. A request body is not recorded that way.
+
+Nothing is invented. A name the watchdog was not given is logged as missing rather than
+filled with a generated stand-in, and when no configuration is present at all the
+runtime starts the old way - signing key generated inside the sandbox, no database and
+no provider - with the log saying so plainly.
+
+## Runtime configuration
+
+Set these as Actions secrets and variables. The secrets are masked in the transcript;
+the variables are not, which is why they hold nothing sensitive.
+
+| Name | Kind | Effect on a recovered runtime |
+|---|---|---|
+| `DATABASE_URL` | secret | the database it connects to |
+| `OPENROUTER_API_KEY` | secret | provider key for the agent |
+| `JWT_SECRET` | secret | keeps existing sessions valid across a recovery; generated fresh when absent |
+| `MY_AI_STUDIO_CREDENTIAL_KEY` | secret | keeps a credential already encrypted in the database readable |
+| `DATABASE_SSL` | variable | set `true` for a provider that requires TLS, such as Supabase |
+| `OPENROUTER_MODEL` | variable | which model the agent uses |
+| `MY_AI_STUDIO_ADMIN_EMAIL` | variable | promotes this account to admin on a fresh database |
+
+An unset secret arrives as an empty string, which the watchdog treats as absent rather
+than as a configured-but-empty value.
 
 ## Verification
 

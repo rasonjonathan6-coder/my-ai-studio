@@ -16,7 +16,15 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
-import { recoverStudio, startCommand, forwardableSecrets } from '../src/recovery.mjs';
+import {
+  recoverStudio,
+  startCommand,
+  forwardableSecrets,
+  studioEnv,
+  chmodCommand,
+  secretNames,
+  ENV_FILE,
+} from '../src/recovery.mjs';
 import { OpenHandsClient, SandboxShell, ApiError, WORKER_PORTS } from '../src/openhandsClient.mjs';
 import { VERDICT } from '../src/discovery.mjs';
 import { runCycle } from '../src/watchdog.mjs';
@@ -69,10 +77,12 @@ function fakeClient({ sandbox = SANDBOX } = {}) {
 }
 
 /** A shell that records commands and succeeds unless told otherwise. */
-function fakeShell({ failOn = null } = {}) {
+function fakeShell({ failOn = null, failUpload = false } = {}) {
   const commands = [];
+  const uploads = [];
   return {
     commands,
+    uploads,
     async run(command) {
       commands.push(command);
       if (failOn && command.includes(failOn)) {
@@ -85,6 +95,12 @@ function fakeShell({ failOn = null } = {}) {
       if (command.includes('npm install')) return { exitCode: 0, stdout: 'EXIT=0', stderr: '' };
       if (command.includes('LAUNCHED')) return { exitCode: 0, stdout: 'LAUNCHED', stderr: '' };
       return { exitCode: 0, stdout: 'ok', stderr: '' };
+    },
+    /** Records the content as the fake's own copy of what would have been written. */
+    async uploadFile(path, content) {
+      if (failUpload) throw new ApiError('upload failed with HTTP 500', { status: 500 });
+      uploads.push({ path, content });
+      return true;
     },
     async runChecked(command) {
       const result = await this.run(command);
@@ -99,15 +115,20 @@ function fakeShell({ failOn = null } = {}) {
 function withFakeShell(shell) {
   const original = SandboxShell.prototype.run;
   const originalChecked = SandboxShell.prototype.runChecked;
+  const originalUpload = SandboxShell.prototype.uploadFile;
   SandboxShell.prototype.run = function (command, options) {
     return shell.run(command, options);
   };
   SandboxShell.prototype.runChecked = function (command, options) {
     return shell.runChecked(command, options);
   };
+  SandboxShell.prototype.uploadFile = function (path, content, options) {
+    return shell.uploadFile(path, content, options);
+  };
   return () => {
     SandboxShell.prototype.run = original;
     SandboxShell.prototype.runChecked = originalChecked;
+    SandboxShell.prototype.uploadFile = originalUpload;
   };
 }
 
@@ -139,6 +160,31 @@ describe('startCommand', () => {
   it('contains no credential', () => {
     assert.doesNotMatch(startCommand(), /sk-|gh[pousr]_|Bearer/);
   });
+
+  it('reads the environment file instead of generating a signing key when provisioned', () => {
+    const command = startCommand({ useEnvFile: true });
+    // Only the path is named. A value here would be recorded in the sandbox's bash
+    // event history, which is the whole reason the file exists.
+    assert.match(command, /--env-file=\/tmp\/studio\.env/);
+    assert.doesNotMatch(command, /dev\/urandom/);
+    // The signing key comes from the file, so an assignment here would override it and
+    // silently invalidate every session the persistent key was meant to preserve.
+    assert.doesNotMatch(command, /JWT_SECRET=/);
+  });
+
+  it('still names the port and the host-execution opt-in when provisioned', () => {
+    const command = startCommand({ useEnvFile: true });
+    assert.match(command, /PORT=12000/);
+    assert.match(command, /NODE_ENV=production/);
+    // Set in the environment rather than the file: it configures this host, not the app.
+    assert.match(command, /NODE_OPTIONS="--env-file=\/tmp\/studio\.env"/);
+  });
+
+  it('keeps a launch that chains its steps when provisioned', () => {
+    const command = startCommand({ useEnvFile: true });
+    assert.match(command, /&&/);
+    assert.match(command, /&\)/);
+  });
 });
 
 describe('forwardableSecrets', () => {
@@ -150,6 +196,77 @@ describe('forwardableSecrets', () => {
     } finally {
       if (saved !== undefined) process.env.DATABASE_URL = saved;
     }
+  });
+
+  it('reads the environment it is given, not the process', () => {
+    const names = forwardableSecrets({ env: { OPENROUTER_MODEL: 'a/model', DATABASE_SSL: 'true' } });
+    assert.deepEqual(names, ['DATABASE_SSL', 'OPENROUTER_MODEL']);
+  });
+
+  it('ignores a name that is present but empty', () => {
+    // A GitHub secret that was never set arrives as an empty string, not as a missing
+    // key. Treating that as configured would write KEY= and let the studio start with
+    // a credential that is not one.
+    assert.deepEqual(forwardableSecrets({ env: { DATABASE_URL: '' } }), []);
+  });
+
+  it('names the credential-bearing variables separately from the plain settings', () => {
+    assert.deepEqual(secretNames(), [
+      'DATABASE_URL',
+      'OPENROUTER_API_KEY',
+      'JWT_SECRET',
+      'MY_AI_STUDIO_CREDENTIAL_KEY',
+    ]);
+  });
+});
+
+describe('studioEnv', () => {
+  it('writes one KEY=VALUE line per configured name', () => {
+    const { body } = studioEnv({
+      env: { DATABASE_URL: 'postgres://u:p@h/db', OPENROUTER_MODEL: 'vendor/model' },
+    });
+    const lines = body.trimEnd().split('\n');
+    assert.deepEqual(lines, ['DATABASE_URL=postgres://u:p@h/db', 'OPENROUTER_MODEL=vendor/model']);
+  });
+
+  it('leaves out a name that was not configured and reports it as missing', () => {
+    const { body, names, missing } = studioEnv({ env: { OPENROUTER_MODEL: 'vendor/model' } });
+    assert.deepEqual(names, ['OPENROUTER_MODEL']);
+    assert.doesNotMatch(body, /DATABASE_URL/);
+    assert.ok(missing.includes('DATABASE_URL'));
+    // Nothing is generated to stand in for it.
+    assert.ok(!/\n.+=/.test(body) || body.trimEnd().split('\n').length === 1);
+  });
+
+  it('returns an empty body when nothing is configured', () => {
+    const { body, names } = studioEnv({ env: {} });
+    assert.equal(body, '');
+    assert.deepEqual(names, []);
+  });
+
+  it('refuses a value carrying a newline instead of writing two lines', () => {
+    // A multi-line value would silently become a second variable, changing which
+    // names the runtime sees. Refusing is louder than writing something wrong.
+    const { body, refused } = studioEnv({
+      env: { OPENROUTER_API_KEY: 'line-one\nINJECTED=line-two' },
+    });
+    assert.deepEqual(refused, ['OPENROUTER_API_KEY']);
+    assert.equal(body, '');
+    assert.doesNotMatch(body, /INJECTED/);
+  });
+
+  it('carries the non-secret settings too', () => {
+    const { body } = studioEnv({ env: { DATABASE_SSL: 'true', MY_AI_STUDIO_ADMIN_EMAIL: 'ops@example.test' } });
+    assert.match(body, /^DATABASE_SSL=true$/m);
+    assert.match(body, /^MY_AI_STUDIO_ADMIN_EMAIL=ops@example\.test$/m);
+  });
+});
+
+describe('chmodCommand', () => {
+  it('names the path and never a value', () => {
+    const command = chmodCommand();
+    assert.equal(command, 'chmod 600 /tmp/studio.env');
+    assert.doesNotMatch(command, /sk-|gh[pousr]_|Bearer|postgres:\/\//);
   });
 });
 
@@ -370,15 +487,15 @@ describe('recoverStudio', () => {
     }
   });
 
-  it('sends no credential to the sandbox', async () => {
-    // Placeholder values, deliberately shaped so they cannot be mistaken for a
-    // real credential by a secret scanner or by a reader. What is being tested
-    // is that a value present in this process's environment never reaches the
-    // command sent to the sandbox, so any distinctive string works.
+  it('never puts a configuration value in a command', async () => {
+    // Placeholder values, deliberately shaped so they cannot be mistaken for a real
+    // credential by a secret scanner or by a reader. What is being tested is that a
+    // value present in this process's environment reaches the sandbox as uploaded
+    // content and never as part of a command string, so any distinctive string works.
     const signingKey = 'fixture-signing-key-not-a-real-value';
     const providerKey = 'fixture-provider-key-not-a-real-value';
-    // Set by name: the literal `NAME = value` form is what a secret scanner
-    // looks for, and naming the variable separately reads no worse.
+    // Set by name: the literal `NAME = value` form is what a secret scanner looks for,
+    // and naming the variable separately reads no worse.
     const setEnv = (name, value) => {
       process.env[name] = value;
     };
@@ -396,11 +513,161 @@ describe('recoverStudio', () => {
       const joined = shell.commands.join('\n');
       assert.doesNotMatch(joined, new RegExp(signingKey));
       assert.doesNotMatch(joined, new RegExp(providerKey));
+      // And the values did reach the runtime, by the one channel that is not a
+      // command. Without this half the test would pass by forwarding nothing at all.
+      const uploaded = shell.uploads.map((entry) => entry.content).join('\n');
+      assert.match(uploaded, new RegExp(signingKey));
+      assert.match(uploaded, new RegExp(providerKey));
     } finally {
       restore();
       delete process.env.JWT_SECRET;
       delete process.env.OPENROUTER_API_KEY;
     }
+  });
+});
+
+describe('provisioning the runtime environment', () => {
+  it('uploads the configuration, reaches it before starting, and names no value in a command', async () => {
+    const shell = fakeShell();
+    const restore = withFakeShell(shell);
+    const fixture = {
+      DATABASE_URL: 'postgres://u:fixturepassword@db.example:5432/studio',
+      OPENROUTER_API_KEY: 'fixture-provider-key-not-a-real-value',
+      DATABASE_SSL: 'true',
+      OPENROUTER_MODEL: 'vendor/model',
+      JWT_SECRET: 'fixture-signing-key-not-a-real-value',
+    };
+    try {
+      await recoverStudio({
+        client: fakeClient(),
+        publish: async () => {},
+        sleep: noSleep,
+        healthProbe: async () => ({ ok: true }),
+        env: fixture,
+      });
+
+      // One upload, to the path the launch reads.
+      assert.equal(shell.uploads.length, 1);
+      assert.equal(shell.uploads[0].path, ENV_FILE);
+      assert.match(shell.uploads[0].content, /^DATABASE_URL=/m);
+      assert.match(shell.uploads[0].content, /^DATABASE_SSL=true$/m);
+      assert.match(shell.uploads[0].content, /^OPENROUTER_MODEL=vendor\/model$/m);
+
+      const joined = shell.commands.join('\n');
+      // No value, secret or not, appears in any command. This is the invariant the
+      // whole mechanism exists to hold: a command is recorded in the sandbox's bash
+      // event history and stays readable through the API afterwards.
+      assert.doesNotMatch(joined, /fixturepassword/);
+      assert.doesNotMatch(joined, /fixture-provider-key-not-a-real-value/);
+      assert.doesNotMatch(joined, /fixture-signing-key-not-a-real-value/);
+      // The launch points at the file.
+      assert.match(joined, /--env-file=\/tmp\/studio\.env/);
+      // And the signing key was not regenerated, because one was supplied.
+      assert.doesNotMatch(joined, /dev\/urandom/);
+
+      // The file is restricted before the launch, not after.
+      const chmodAt = shell.commands.indexOf('chmod 600 /tmp/studio.env');
+      const launchAt = shell.commands.findIndex((command) => command.includes('LAUNCHED'));
+      assert.ok(chmodAt !== -1, 'chmod was never run');
+      assert.ok(launchAt !== -1, 'the studio was never started');
+      assert.ok(chmodAt < launchAt, 'the file was launched before it was restricted');
+    } finally {
+      restore();
+    }
+  });
+
+  it('writes no file and starts the old way when nothing is configured', async () => {
+    const shell = fakeShell();
+    const restore = withFakeShell(shell);
+    try {
+      await recoverStudio({
+        client: fakeClient(),
+        publish: async () => {},
+        sleep: noSleep,
+        healthProbe: async () => ({ ok: true }),
+        env: {},
+      });
+      assert.equal(shell.uploads.length, 0, 'a file was written with nothing to put in it');
+      const joined = shell.commands.join('\n');
+      // The older behaviour, kept for a run with no configuration at all.
+      assert.match(joined, /dev\/urandom/);
+      assert.doesNotMatch(joined, /--env-file/);
+    } finally {
+      restore();
+    }
+  });
+
+  it('does not start the studio when the upload fails', async () => {
+    const shell = fakeShell({ failUpload: true });
+    const restore = withFakeShell(shell);
+    try {
+      await assert.rejects(
+        () =>
+          recoverStudio({
+            client: fakeClient(),
+            publish: async () => {},
+            sleep: noSleep,
+            healthProbe: async () => ({ ok: true }),
+            env: { OPENROUTER_MODEL: 'vendor/model' },
+          }),
+        (err) => {
+          // A studio launched without the configuration it was supposed to receive
+          // would look like a working recovery running on defaults. Failing here is
+          // the point: nothing downstream may run.
+          assert.equal(err.name, 'RecoveryError');
+          assert.match(err.message, /provision runtime environment/);
+          return true;
+        },
+      );
+      const joined = shell.commands.join('\n');
+      assert.doesNotMatch(joined, /LAUNCHED/, 'the studio was started despite a failed upload');
+      assert.doesNotMatch(joined, /chmod/, 'a file was restricted that was never written');
+    } finally {
+      restore();
+    }
+  });
+
+  it('never prints a configuration value through the real logging path', async () => {
+    const shell = fakeShell();
+    const restore = withFakeShell(shell);
+    const { log } = await import('../src/log.mjs');
+    const fixture = {
+      DATABASE_URL: 'postgres://u:fixturepassword@db.example:5432/studio',
+      OPENROUTER_API_KEY: 'fixture-provider-key-not-a-real-value',
+      MY_AI_STUDIO_CREDENTIAL_KEY: 'fixture-credential-key-not-a-real-value',
+      JWT_SECRET: 'fixture-signing-key-not-a-real-value',
+    };
+    // Set on the process too, because that is where the redaction list reads from.
+    for (const [name, value] of Object.entries(fixture)) process.env[name] = value;
+    const written = [];
+    const realOut = process.stdout.write;
+    const realErr = process.stderr.write;
+    process.stdout.write = (chunk) => written.push(String(chunk));
+    process.stderr.write = (chunk) => written.push(String(chunk));
+    try {
+      await recoverStudio({
+        client: fakeClient(),
+        publish: async () => {},
+        sleep: noSleep,
+        healthProbe: async () => ({ ok: true }),
+        env: fixture,
+      });
+      // The provisioning step logs the names it wrote. A value must not ride along.
+      log.info('probe line', { detail: { echo: fixture.DATABASE_URL } });
+    } finally {
+      process.stdout.write = realOut;
+      process.stderr.write = realErr;
+      restore();
+      for (const name of Object.keys(fixture)) delete process.env[name];
+    }
+    const output = written.join('');
+    assert.doesNotMatch(output, /fixturepassword/);
+    assert.doesNotMatch(output, /fixture-provider-key-not-a-real-value/);
+    assert.doesNotMatch(output, /fixture-credential-key-not-a-real-value/);
+    assert.doesNotMatch(output, /fixture-signing-key-not-a-real-value/);
+    // The names are still reported, so an operator can see what was written.
+    assert.match(output, /DATABASE_URL/);
+    assert.match(output, /runtime environment provisioned/);
   });
 });
 

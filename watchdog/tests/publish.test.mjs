@@ -416,6 +416,10 @@ describe('a rejected push still discards the recovered sandbox', () => {
         if (command.includes('LAUNCHED')) return { exitCode: 0, stdout: 'LAUNCHED', stderr: '' };
         return { exitCode: 0, stdout: 'ok', stderr: '' };
       },
+      /** The configuration arrives as a request body, never as a command. */
+      async uploadFile() {
+        return true;
+      },
       async runChecked(command) {
         const result = await this.run(command);
         if (result.exitCode !== 0) throw new ApiError('command exited 1', { detail: result });
@@ -425,8 +429,10 @@ describe('a rejected push still discards the recovered sandbox', () => {
 
     const originalRun = SandboxShell.prototype.run;
     const originalChecked = SandboxShell.prototype.runChecked;
+    const originalUpload = SandboxShell.prototype.uploadFile;
     SandboxShell.prototype.run = (command, options) => shell.run(command, options);
     SandboxShell.prototype.runChecked = (command, options) => shell.runChecked(command, options);
+    SandboxShell.prototype.uploadFile = () => shell.uploadFile();
 
     try {
       await assert.rejects(
@@ -449,6 +455,7 @@ describe('a rejected push still discards the recovered sandbox', () => {
     } finally {
       SandboxShell.prototype.run = originalRun;
       SandboxShell.prototype.runChecked = originalChecked;
+      SandboxShell.prototype.uploadFile = originalUpload;
       studio.server.close();
     }
   });

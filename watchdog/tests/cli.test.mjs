@@ -20,6 +20,8 @@
 
 import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
+
+import { withoutForwardableNames } from './helpers.mjs';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -128,7 +130,7 @@ function runWatchdog(...args) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [WATCHDOG, ...args], {
       env: {
-        ...process.env,
+        ...withoutForwardableNames(process.env),
         URL_JSON_URL: `${baseUrl}/url.json`,
         // One attempt, no backoff: the classification is covered in discovery
         // tests, so this only has to reach the verdict quickly.
@@ -263,6 +265,9 @@ describe('watchdog CLI exit codes for a full cycle', () => {
 
     const server = createServer((req, res) => {
       const url = new URL(req.url, 'http://127.0.0.1');
+      // Contents the watchdog uploaded, so a test can show the configuration travelled
+      // as a request body rather than inside a command.
+      const uploads = [];
       const json = (status, body) => {
         const payload = JSON.stringify(body);
         res.writeHead(status, { 'content-type': 'application/json' }).end(payload);
@@ -321,7 +326,20 @@ describe('watchdog CLI exit codes for a full cycle', () => {
         return json(200, { success: true });
       }
 
-      if (url.pathname === '/api/bash/execute_bash_command') {
+        if (url.pathname === '/api/file/upload') {
+          // The runtime configuration arrives as a multipart body, never as a command.
+          let raw = '';
+          req.on('data', (chunk) => {
+            raw += chunk;
+          });
+          req.on('end', () => {
+            uploads.push({ path: url.searchParams.get('path'), body: raw });
+            json(200, { ok: true });
+          });
+          return undefined;
+        }
+
+        if (url.pathname === '/api/bash/execute_bash_command') {
         let raw = '';
         req.on('data', (chunk) => {
           raw += chunk;
@@ -374,7 +392,7 @@ describe('watchdog CLI exit codes for a full cycle', () => {
     const args = mode === 'plan' ? ['--plan'] : mode === 'publish' ? [] : ['--dry-run'];
     const child = spawn(process.execPath, [watchdog, ...args, ...extraArgs], {
       env: {
-        ...process.env,
+        ...withoutForwardableNames(process.env),
         URL_JSON_URL: `${apiUrl}/url.json`,
         OPENHANDS_BASE_URL: apiUrl,
         OPENHANDS_API_KEY: 'fixture-openhands-key-not-a-real-value',

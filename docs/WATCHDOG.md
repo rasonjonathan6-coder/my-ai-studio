@@ -143,9 +143,14 @@ my-ai-studio backend listening   url=http://0.0.0.0:12000  env=production
                                  executionBackend=host
 ```
 
-Note `database=not_configured` and `openrouter=not_configured`. The recovered
-runtime is genuinely degraded, and the log says so rather than implying it is
-fully configured. See the README for why no credential is copied in.
+Note `database=not_configured` and `openrouter=not_configured`. These runs were recorded
+before the watchdog could hand a recovered runtime its configuration, so the runtime was
+genuinely degraded and the log said so rather than implying it was fully configured.
+
+That changed: the configuration is now written into the sandbox as `/tmp/studio.env`
+over multipart and read back at launch with `node --env-file`, so a `not_configured`
+line now means the corresponding repository secret is unset. See the README's runtime
+configuration section for the names.
 
 After the run, `url.json` was confirmed unchanged, and the sandbox the dry run
 created (`IHBNOL94O0ceFTKxD6FT2`) was deleted; a follow-up listing showed only
@@ -227,10 +232,12 @@ not catch.
   deliberately dead URL to trigger it. The studio has not actually died, so
   recovery from a genuine outage has not been observed.
 
-- **Recovery of a runtime with `DATABASE_URL` and `OPENROUTER_API_KEY` set.** The
-  recovered runtime was verified running without them. Whether the studio works
-  fully once they are configured on a new runtime follows from the studio's own
-  tests, not from this watchdog's runs.
+- **Recovery of a runtime with a database and a provider key configured.** The recovered
+  runtime was verified running without them, and the mechanism that supplies them is
+  covered by the suite. What has not been observed is a live recovery with the secrets
+  set: no `mode=rebuild` dispatch has been run since the mechanism landed, and doing so
+  spends a sandbox. Until that run exists, treat "a recovered runtime connects to the
+  database" as NOT TESTED against the live service.
 
 - **Publishing over GitHub's own transport.** The commit and the push are
   exercised against a real local bare remote, which is where the logic lives - the

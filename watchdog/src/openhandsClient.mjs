@@ -237,6 +237,44 @@ export class SandboxShell {
     }
   }
 
+  /**
+   * Writes a file by content, over multipart. The content is the body of the request,
+   * never an argument of a command: that is the whole point of this method. A secret
+   * placed in a command string would be recorded in the sandbox's bash event history,
+   * where it stays readable through the API after the run.
+   */
+  async uploadFile(path, content, { timeoutMs } = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs ?? this.timeoutMs);
+    try {
+      const form = new FormData();
+      form.append('file', new Blob([content], { type: 'application/octet-stream' }), 'file.bin');
+      const res = await this.fetchImpl(
+        `${this.agentServerUrl}/api/file/upload?path=${encodeURIComponent(path)}`,
+        {
+          method: 'POST',
+          signal: controller.signal,
+          headers: {
+            'X-Session-API-Key': this.sessionApiKey,
+            Accept: 'application/json',
+          },
+          body: form,
+        },
+      );
+      if (!res.ok) {
+        // The response body is deliberately not echoed: an error must not be able to
+        // turn into a channel for the content being uploaded.
+        throw new ApiError(`upload failed with HTTP ${res.status}`, { status: res.status });
+      }
+      return true;
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      throw new ApiError(`upload could not run: ${err instanceof Error ? err.message : err}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /** Runs a command and throws when it exits non-zero. */
   async runChecked(command, options) {
     const result = await this.run(command, options);

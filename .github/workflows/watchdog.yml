@@ -173,6 +173,18 @@ jobs:
         id: recover
         env:
           OPENHANDS_API_KEY: ${{ secrets.OPENHANDS_API_KEY }}
+          # Configuration handed to the recovered runtime. The watchdog writes it into
+          # the sandbox as an environment file over multipart, so no value reaches a
+          # command string, the bash event history, or this transcript. A name that is
+          # not configured arrives empty and is reported missing rather than being
+          # replaced by a generated stand-in.
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          MY_AI_STUDIO_CREDENTIAL_KEY: ${{ secrets.MY_AI_STUDIO_CREDENTIAL_KEY }}
+          DATABASE_SSL: ${{ vars.DATABASE_SSL }}
+          OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL }}
+          MY_AI_STUDIO_ADMIN_EMAIL: ${{ vars.MY_AI_STUDIO_ADMIN_EMAIL }}
           WATCHDOG_STATE_PATH: ${{ runner.temp }}/watchdog-state.json
           WATCHDOG_MAX_REBUILDS_PER_DAY: '4'
         run: |

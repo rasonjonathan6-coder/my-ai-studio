@@ -21,7 +21,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
-import { ApiError, OpenHandsClient } from '../src/openhandsClient.mjs';
+import { ApiError, OpenHandsClient, SandboxShell } from '../src/openhandsClient.mjs';
 
 const SANDBOX_ID = '7ab3DU3awDW8DSHDTOpYG3';
 const CREDENTIAL = 'unit-test-credential';
@@ -347,3 +347,85 @@ describe('OpenHandsClient never logs its credential', () => {
     );
   });
 });
+
+describe('SandboxShell.uploadFile', () => {
+  const AGENT_URL = 'https://agent.example.invalid';
+
+  /** A fetch that records the request and answers with the given status. */
+  function fakeUpload({ status = 200, body = '{"ok":true}' } = {}) {
+    const calls = [];
+    const fetchImpl = async (url, options = {}) => {
+      calls.push({ url, method: options.method, headers: options.headers, body: options.body });
+      return new Response(body, { status });
+    };
+    return { calls, fetchImpl };
+  }
+
+  function makeShell(fake) {
+    return new SandboxShell({
+      agentServerUrl: AGENT_URL,
+      sessionApiKey: CREDENTIAL,
+      fetchImpl: fake.fetchImpl,
+    });
+  }
+
+  it('posts the content as a multipart body, not as a command', async () => {
+    const fake = fakeUpload();
+    const shell = makeShell(fake);
+    const content = 'DATABASE_URL=postgres://u:p@h/db\n';
+    await shell.uploadFile('/tmp/studio.env', content);
+
+    assert.equal(fake.calls.length, 1);
+    const call = fake.calls[0];
+    assert.equal(call.method, 'POST');
+    assert.match(call.url, /\/api\/file\/upload\?path=%2Ftmp%2Fstudio\.env$/);
+    assert.ok(call.body instanceof FormData, 'the body was not multipart');
+    assert.equal(call.headers['X-Session-API-Key'], CREDENTIAL);
+    // The content is readable from the form, which is where it belongs: it is the
+    // request body, not an argument of a command.
+    const sent = call.body.get('file');
+    assert.equal(await sent.text(), content);
+  });
+
+  it('raises when the upload is refused, without echoing the content back', async () => {
+    // An error must not become a second channel for what was being uploaded, so the
+    // response body is deliberately not propagated into the message.
+    const fake = fakeUpload({ status: 500, body: 'DATABASE_URL=postgres://u:p@h/db is invalid' });
+    const shell = makeShell(fake);
+    await assert.rejects(
+      () => shell.uploadFile('/tmp/studio.env', 'DATABASE_URL=postgres://u:p@h/db\n'),
+      (err) => {
+        assert.ok(err instanceof ApiError);
+        assert.match(err.message, /upload failed with HTTP 500/);
+        assert.doesNotMatch(err.message, /postgres/);
+        return true;
+      },
+    );
+  });
+
+  it('raises when the request cannot be made at all', async () => {
+    const shell = new SandboxShell({
+      agentServerUrl: AGENT_URL,
+      sessionApiKey: CREDENTIAL,
+      fetchImpl: async () => {
+        throw new Error('network down');
+      },
+    });
+    await assert.rejects(
+      () => shell.uploadFile('/tmp/studio.env', 'X=1\n'),
+      (err) => {
+        assert.ok(err instanceof ApiError);
+        assert.match(err.message, /upload could not run/);
+        return true;
+      },
+    );
+  });
+
+  it('encodes a path that needs escaping rather than concatenating it raw', async () => {
+    const fake = fakeUpload();
+    const shell = makeShell(fake);
+    await shell.uploadFile('/tmp/a b#c.env', 'X=1\n');
+    assert.match(fake.calls[0].url, /path=%2Ftmp%2Fa%20b%23c\.env$/);
+  });
+});
+

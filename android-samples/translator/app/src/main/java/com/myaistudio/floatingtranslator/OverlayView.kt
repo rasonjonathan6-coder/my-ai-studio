@@ -255,13 +255,23 @@ class OverlayView(private val context: Context) : OverlayController.Listener {
         }
         val settings = AppSettings.load(context)
         if (!settings.configured) {
-            setStatus("set server URL and token in the app", "error"); return
+            setStatus("set the session token in the app", "error"); return
         }
 
         setStatus("translating…", "info")
         io.execute {
+            // The studio address is read here rather than from settings, so this
+            // APK keeps working after the studio moves. On the IO thread, because
+            // discovery performs a network call.
+            val baseUrl = when (val resolved = StudioUrlResolver.resolveBaseUrl(settings.baseUrlOverride)) {
+                is StudioUrlResolver.Result.Resolved -> resolved.studioUrl
+                is StudioUrlResolver.Result.Failed -> {
+                    post { setStatus("studio address unavailable: ${resolved.reason}", "error") }
+                    return@execute
+                }
+            }
             val result = TranslationClient.translate(
-                TranslationClient.Config(settings.baseUrl, settings.token),
+                TranslationClient.Config(baseUrl, settings.token),
                 text,
                 source = null,       // let the model detect the source
                 target = settings.replyTarget,
@@ -313,13 +323,22 @@ class OverlayView(private val context: Context) : OverlayController.Listener {
         }
         val settings = AppSettings.load(context)
         if (!settings.configured) {
-            setStatus("set server URL and token in the app", "error"); return
+            setStatus("set the session token in the app", "error"); return
         }
 
         setStatus("translating last message…", "info")
         io.execute {
+            // Resolved per attempt, as in the send flow, so a studio that moved
+            // between two translations is picked up without restarting the app.
+            val baseUrl = when (val resolved = StudioUrlResolver.resolveBaseUrl(settings.baseUrlOverride)) {
+                is StudioUrlResolver.Result.Resolved -> resolved.studioUrl
+                is StudioUrlResolver.Result.Failed -> {
+                    post { setStatus("studio address unavailable: ${resolved.reason}", "error") }
+                    return@execute
+                }
+            }
             val result = TranslationClient.translate(
-                TranslationClient.Config(settings.baseUrl, settings.token),
+                TranslationClient.Config(baseUrl, settings.token),
                 candidate,
                 source = null,
                 target = settings.readTarget,

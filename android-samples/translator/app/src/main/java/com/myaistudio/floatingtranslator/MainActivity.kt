@@ -12,6 +12,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import java.util.concurrent.Executors
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
@@ -28,10 +29,14 @@ import com.google.android.material.textfield.TextInputLayout
 class MainActivity : AppCompatActivity() {
 
     private lateinit var permissionsStatus: TextView
+    private lateinit var studioStatus: TextView
     private lateinit var urlField: TextInputEditText
     private lateinit var tokenField: TextInputEditText
     private lateinit var replyLangField: TextInputEditText
     private lateinit var readLangField: TextInputEditText
+
+    /** Discovery performs a network call, so it runs off the main thread. */
+    private val io = Executors.newSingleThreadExecutor()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -41,6 +46,12 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         refreshStatus()
+        refreshStudioAddress()
+    }
+
+    override fun onDestroy() {
+        io.shutdown()
+        super.onDestroy()
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
@@ -99,7 +110,10 @@ class MainActivity : AppCompatActivity() {
         })
 
         root.addView(card("Server") {
-            val (urlWrap, urlEdit) = input("Server URL (e.g. http://10.0.2.2:8080)", settings.baseUrl)
+            studioStatus = text("Studio address: not checked yet", 13f, R.color.text_primary)
+            addView(studioStatus)
+            addView(button("Refresh studio address") { refreshStudioAddress() })
+            val (urlWrap, urlEdit) = input("Override studio URL (blank = discover automatically)", settings.baseUrlOverride)
             urlField = urlEdit
             addView(urlWrap)
             val (tokenWrap, tokenEdit) = input("Session token from /api/auth/login", settings.token, password = true)
@@ -107,8 +121,10 @@ class MainActivity : AppCompatActivity() {
             addView(tokenWrap)
             addView(
                 hint(
-                    "Sign in to My AI Studio in a browser and copy the session token. " +
-                        "This app sends it as a bearer token; the provider key never leaves the server.",
+                    "The studio address is read at runtime from the published url.json, so this app " +
+                        "keeps working when the studio moves and does not need rebuilding. Sign in to " +
+                        "My AI Studio in a browser and copy the session token; this app sends it as a " +
+                        "bearer token and the provider key never leaves the server.",
                 ),
             )
         })
@@ -187,11 +203,30 @@ class MainActivity : AppCompatActivity() {
 
     private fun mark(ok: Boolean): String = if (ok) "\u2713" else "\u2717"
 
+    /**
+     * Shows where the app would send requests right now, by running the same
+     * resolution the send paths use. It reports what actually happened - the
+     * resolved address, or the reason discovery failed - rather than assuming.
+     */
+    private fun refreshStudioAddress() {
+        studioStatus.text = "Studio address: checking…"
+        val override = urlField.text?.toString().orEmpty()
+        io.execute {
+            val resolved = StudioUrlResolver.resolveBaseUrl(override)
+            runOnUiThread {
+                studioStatus.text = when (resolved) {
+                    is StudioUrlResolver.Result.Resolved -> "Studio address: ${resolved.studioUrl}"
+                    is StudioUrlResolver.Result.Failed -> "Studio address: unavailable (${resolved.reason})"
+                }
+            }
+        }
+    }
+
     private fun saveSettings() {
         AppSettings.save(
             this,
             AppSettings.Snapshot(
-                baseUrl = urlField.text?.toString().orEmpty(),
+                baseUrlOverride = urlField.text?.toString().orEmpty(),
                 token = tokenField.text?.toString().orEmpty(),
                 replyTarget = replyLangField.text?.toString().orEmpty().ifBlank { "English" },
                 readTarget = readLangField.text?.toString().orEmpty().ifBlank { "French" },
@@ -199,6 +234,7 @@ class MainActivity : AppCompatActivity() {
             ),
         )
         toast("settings saved")
+        refreshStudioAddress()
     }
 
     private fun toast(message: String) {

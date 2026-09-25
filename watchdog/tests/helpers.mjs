@@ -74,8 +74,10 @@ export function makeLaunchFixture(markers = LAUNCH_MARKERS) {
   // PORT is reported alongside the markers because it is assigned by the command
   // rather than by the file, so it shows whether the `env` prefix survived too. The
   // canary is reported for the same reason: it can only be visible if the launch
-  // inherited an environment it was supposed to be isolated from.
-  const reported = [...Object.keys(markers), 'PORT', ISOLATION_CANARY];
+  // inherited an environment it was supposed to be isolated from. The host-execution
+  // opt-in is reported because the server refuses to start without it, so its absence
+  // is fatal rather than merely wrong.
+  const reported = [...Object.keys(markers), 'PORT', ISOLATION_CANARY, HOST_EXECUTION_OPT_IN];
   writeFileSync(
     script,
     `console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(reported)}.map((n) => [n, process.env[n] ?? null]))));\n`,
@@ -115,6 +117,16 @@ export function makeLaunchFixture(markers = LAUNCH_MARKERS) {
 
 /** A name set outside the launch, present only if the isolation did not hold. */
 export const ISOLATION_CANARY = 'WATCHDOG_LAUNCH_CANARY';
+
+/**
+ * The opt-in the server requires to start at all.
+ *
+ * The backend refuses to run in production without it, so a launch missing it dies
+ * immediately while the command string still reads correctly. Naming it here lets a
+ * test assert on the value the launched process actually received.
+ */
+export const HOST_EXECUTION_OPT_IN = 'ALLOW_HOST_EXECUTION_IN_PRODUCTION';
+
 export function runLaunchIsolated(command, { envFile, script, withEnv = {} } = {}) {
   const match = command.match(/nohup\s+(env\s+.*?)\s+>\s/);
   if (!match) throw new Error(`no launch found in command: ${command}`);

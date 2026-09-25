@@ -131,7 +131,17 @@ export function startCommand({ port = PORT, logFile = '/tmp/my-ai-studio.log', u
   // and leaves the server never started. The launch itself is wrapped in a
   // subshell so the command returns immediately instead of waiting on the
   // server.
-  const settings = [`PORT=${port}`, `NODE_ENV=production`];
+  const settings = [
+    `PORT=${port}`,
+    `NODE_ENV=production`,
+    // This host is a single-tenant sandbox that exists only to serve the studio, so
+    // running the agent's commands in-process is the intended mode. It sits outside
+    // the branch below because the server refuses to start without it in either:
+    // the provisioned branch launches the same server, and leaving it to one branch
+    // is what let the provisioned launch die on "Refusing to start: SANDBOX_ENABLED
+    // is false in production" after the environment file had already been read.
+    `ALLOW_HOST_EXECUTION_IN_PRODUCTION=true`,
+  ];
   let nodeArgs = [];
   if (useEnvFile) {
     // `--env-file` is passed to node directly, not through NODE_OPTIONS: node
@@ -140,12 +150,7 @@ export function startCommand({ port = PORT, logFile = '/tmp/my-ai-studio.log', u
     // option rather than an argument to the script.
     nodeArgs = [`--env-file=${envFile}`];
   } else {
-    settings.push(
-      `JWT_SECRET="$SECRET"`,
-      // This host is a single-tenant sandbox that exists only to serve the
-      // studio, so running the agent's commands in-process is the intended mode.
-      `ALLOW_HOST_EXECUTION_IN_PRODUCTION=true`,
-    );
+    settings.push(`JWT_SECRET="$SECRET"`);
   }
   return [
     `cd ${WORK_DIR}`,

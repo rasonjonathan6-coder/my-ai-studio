@@ -28,7 +28,7 @@ import {
 import { OpenHandsClient, SandboxShell, ApiError, WORKER_PORTS } from '../src/openhandsClient.mjs';
 import { VERDICT } from '../src/discovery.mjs';
 import { runCycle } from '../src/watchdog.mjs';
-import { ISOLATION_CANARY, LAUNCH_MARKERS, makeLaunchFixture, runLaunchIsolated } from './helpers.mjs';
+import { HOST_EXECUTION_OPT_IN, ISOLATION_CANARY, LAUNCH_MARKERS, makeLaunchFixture, runLaunchIsolated } from './helpers.mjs';
 
 const SANDBOX = {
   id: 'sb-test',
@@ -201,6 +201,29 @@ describe('startCommand', () => {
     assert.match(command, /&&/);
     assert.match(command, /&\)/);
   });
+
+  it('permits in-process command execution in both branches', () => {
+    // The server refuses to start in production without this opt-in, so a branch
+    // missing it produces a studio that starts, dies, and looks like a health
+    // problem. It lived only in the unprovisioned branch, which is exactly how the
+    // provisioned launch came to fail with "SANDBOX_ENABLED is false in production"
+    // after the environment file had already been read.
+    assert.match(startCommand(), /ALLOW_HOST_EXECUTION_IN_PRODUCTION=true/);
+    assert.match(startCommand({ useEnvFile: true }), /ALLOW_HOST_EXECUTION_IN_PRODUCTION=true/);
+  });
+
+  it('keeps the opt-in out of the environment file', () => {
+    // The file is the application's configuration and is uploaded to the sandbox;
+    // this name configures the host, so it belongs on the launch command instead.
+    const { body, names } = studioEnv({
+      env: {
+        OPENROUTER_MODEL: 'vendor/model',
+        ALLOW_HOST_EXECUTION_IN_PRODUCTION: 'true',
+      },
+    });
+    assert.deepEqual(names, ['OPENROUTER_MODEL']);
+    assert.doesNotMatch(body, /ALLOW_HOST_EXECUTION_IN_PRODUCTION/);
+  });
 });
 
 describe('the launch actually starts a process', () => {
@@ -221,6 +244,28 @@ describe('the launch actually starts a process', () => {
       // environment. Without this the checks below could pass on an environment that
       // merely happens to lack the configured names, which is what CI is.
       assert.equal(JSON.parse(result.stdout)[ISOLATION_CANARY], null, 'the launch was not isolated');
+      // The strongest form of the check above: the process the command builds really
+      // does receive the opt-in. The backend exits immediately without it, so a
+      // string-only assertion would pass on a launch that cannot start.
+      assert.equal(JSON.parse(result.stdout)[HOST_EXECUTION_OPT_IN], 'true');
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it('starts with the opt-in when running without an environment file', () => {
+    // The unprovisioned branch launches the same server, so it needs the opt-in too.
+    // It generates its own signing key, so the probe is given one.
+    const fixture = makeLaunchFixture();
+    try {
+      const result = runLaunchIsolated(startCommand({ useEnvFile: false }), {
+        ...fixture,
+        withEnv: { SECRET: 'fixture-signing-key-not-a-real-value' },
+      });
+      assert.equal(result.status, 0, `launch exited ${result.status}: ${result.stderr}`);
+      const seen = JSON.parse(result.stdout);
+      assert.equal(seen[HOST_EXECUTION_OPT_IN], 'true');
+      assert.equal(seen[ISOLATION_CANARY], null, 'the launch was not isolated');
     } finally {
       fixture.cleanup();
     }

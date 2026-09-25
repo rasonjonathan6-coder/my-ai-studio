@@ -1,0 +1,89 @@
+name: publish-url-json
+
+# Keeps the committed url.json pointing at a runtime that is actually serving
+# My AI Studio. An installed APK reads url.json from this repository's raw URL,
+# so this file is the only thing that survives an OpenHands runtime dying.
+#
+# INERT BY DEFAULT (step 2). Only workflow_dispatch is enabled, so nothing
+# rewrites url.json until you explicitly start onboarding a new runtime. The
+# schedule block below is the step 4 watchdog and is intentionally commented
+# out: uncomment it once MY_AI_STUDIO_DOMAIN is set as a repository secret.
+#   schedule:
+#     - cron: '*/15 * * * *'
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'New base URL (blank = use the MY_AI_STUDIO_DOMAIN secret)'
+        required: false
+        type: string
+      status:
+        description: 'Status to publish'
+        required: true
+        default: online
+        type: choice
+        options: [online, offline, unknown]
+
+# Least privilege: this job only needs to push url.json back to the branch.
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-url-json
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Resolve candidate runtime
+        id: candidate
+        env:
+          INPUT_URL: ${{ inputs.url }}
+          SECRET_DOMAIN: ${{ secrets.MY_AI_STUDIO_DOMAIN }}
+        run: |
+          # An explicit dispatch input wins; otherwise fall back to the secret
+          # that has to be kept current as runtimes come and go.
+          CANDIDATE="${INPUT_URL:-$SECRET_DOMAIN}"
+          if [ -z "$CANDIDATE" ]; then
+            echo "FAILED: no URL supplied and MY_AI_STUDIO_DOMAIN secret is not set."
+            exit 1
+          fi
+          echo "candidate=$CANDIDATE" >> "$GITHUB_OUTPUT"
+          echo "Resolved candidate: $CANDIDATE"
+
+      - name: Show committed url.json before the update
+        run: cat url.json
+
+      # The script itself refuses to publish a URL whose /api/health does not
+      # answer as my-ai-studio, so a dead runtime can never be written here.
+      - name: Publish url.json
+        run: |
+          node scripts/url-json-update.mjs \
+            --url "${{ steps.candidate.outputs.candidate }}" \
+            --status "${{ inputs.status || 'online' }}"
+
+      - name: Diff
+        run: git --no-pager diff -- url.json
+
+      - name: Commit url.json when it changed
+        run: |
+          if git diff --quiet -- url.json; then
+            echo "url.json unchanged - nothing to publish."
+            exit 0
+          fi
+          git config user.name "my-ai-studio-bot"
+          git config user.email "my-ai-studio-bot@users.noreply.github.com"
+          git add url.json
+          # url.json holds a public URL only; this commit carries no secret.
+          git commit -m "chore(url.json): point the studio at the current runtime"
+          # An unattended watchdog cannot wait for a human merge, so this pushes
+          # to the default branch. Switch to a PR flow if that trade-off changes.
+          git push origin "HEAD:${{ github.event.repository.default_branch }}"

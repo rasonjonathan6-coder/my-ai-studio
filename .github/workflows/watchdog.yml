@@ -6,19 +6,20 @@ name: watchdog
 # prevent its own recovery.
 #
 # INERT BY DEFAULT. Only workflow_dispatch is enabled. The schedule block is
-# commented out on purpose: enabling it lets this workflow create sandboxes and
-# spend quota unattended, which is an operational decision rather than something
-# a commit should switch on. Uncomment it when you want the studio supervised
-# around the clock.
+# commented out on purpose: enabling it lets this workflow create sandboxes, spend
+# quota and publish a new url.json unattended, which is an operational decision
+# rather than something a commit should switch on. Uncomment it when you want the
+# studio supervised around the clock.
 #
 #   schedule:
 #     # Every 30 minutes. Each run is one probe plus, at most, one rebuild.
 #     - cron: '*/30 * * * *'
 #
 # This is deliberately a separate workflow from publish-url-json.yml. That one
-# publishes a URL someone supplied; this one decides whether a URL needs
-# replacing. Keeping them apart means the publishing path stays inert and the
-# recovery path can be scheduled without arming both.
+# publishes a URL someone supplied, for a first deploy; this one decides whether a
+# URL needs replacing. They stay separate so the manual publishing path keeps its
+# own narrow trigger - note that a `rebuild` run here does publish, so scheduling
+# this workflow arms automatic publication as well as automatic rebuilding.
 
 on:
   workflow_dispatch:
@@ -30,12 +31,19 @@ on:
         type: choice
         options: [detect, rebuild]
 
-# The job reads the repository and, when rebuilding, spends OpenHands quota. It
-# needs no write access to this repository: the URL is published by
-# publish-url-json.yml's script, and a rebuilt URL is reported in the job summary
-# rather than committed from here.
+# The job reads the repository and, when rebuilding, spends OpenHands quota and
+# publishes the new URL. It needs `contents: write` because the recovered address
+# is only useful once it is committed and pushed: url.json is what an installed
+# APK reads to find the studio, and a rebuilt runtime nobody can find is not a
+# recovery. The commit is narrowed to url.json alone by the publisher itself.
+#
+# `actions: read` is required rather than convenient: the rebuild budget is
+# carried between runs as a workflow artifact, and listing or downloading
+# artifacts from a previous run needs that scope. It is the read half only -
+# nothing here can write to another run.
 permissions:
-  contents: read
+  contents: write
+  actions: read
 
 # One watchdog at a time. Two concurrent runs could each decide the studio is
 # dead and rebuild, which is exactly the duplication the loop guard exists to
@@ -54,6 +62,72 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+
+      # The rebuild budget only means anything if it survives the run that spent
+      # it. WATCHDOG_STATE_PATH points into runner.temp, which is a fresh
+      # directory each run, so without this the daily cap and the minimum gap
+      # reset to zero every time and a permanently broken studio would be
+      # rebuilt on every scheduled run until the quota ran out.
+      #
+      # The state is carried as a workflow artifact. Two facts about artifacts
+      # shape how this is done, and both were checked rather than assumed:
+      #
+      #  - An upload does NOT replace an earlier artifact of the same name. Each
+      #    run gets its own, and the list endpoint returns them newest first, so
+      #    "the most recent state" is the first match - not `head -1` of a
+      #    directory listing, which would be arbitrary.
+      #  - download-artifact@v4 only sees artifacts of the run it is in. Reading
+      #    one from a previous run needs an explicit token, so artifact-ids is
+      #    resolved above and passed here. That is also why the job now asks for
+      #    `actions: read`.
+      #
+      # No previous artifact means this is the first run, which is normal: the
+      # step reports it and creates nothing, and the watchdog starts from an
+      # empty budget exactly as it does today.
+      - name: Restore the rebuild budget from the last run
+        id: state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          state_path="$RUNNER_TEMP/watchdog-state.json"
+          repository="${{ github.repository }}"
+
+          artifact_id=$(gh api \
+            "repos/$repository/actions/artifacts?name=watchdog-state&per_page=1" \
+            --jq '.artifacts[0].id // ""')
+
+          if [ -z "$artifact_id" ]; then
+            echo "previous=none" >> "$GITHUB_OUTPUT"
+            echo "No previous budget artifact: this is the first run, starting empty."
+            exit 0
+          fi
+
+          if ! gh api "repos/$repository/actions/artifacts/$artifact_id/zip" > "$RUNNER_TEMP/state.zip"; then
+            # Not fatal. A missing or expired artifact is indistinguishable from
+            # a first run, and refusing to check the studio because the budget
+            # could not be read would be the worse failure.
+            echo "previous=unreadable" >> "$GITHUB_OUTPUT"
+            echo "Budget artifact $artifact_id could not be downloaded; starting empty."
+            exit 0
+          fi
+
+          # A single-file upload is stored zip-rooted, so the state file lands at
+          # the top level of the archive.
+          unzip -o "$RUNNER_TEMP/state.zip" -d "$RUNNER_TEMP/state" > /dev/null
+
+          if [ ! -f "$RUNNER_TEMP/state/watchdog-state.json" ]; then
+            echo "previous=empty" >> "$GITHUB_OUTPUT"
+            echo "Artifact $artifact_id held no state file; starting empty."
+            exit 0
+          fi
+
+          # Restored verbatim rather than re-serialised: the watchdog's own
+          # reader is the thing under test, and it already treats a missing or
+          # corrupt file as an empty budget with a warning.
+          cp "$RUNNER_TEMP/state/watchdog-state.json" "$state_path"
+          echo "previous=$artifact_id" >> "$GITHUB_OUTPUT"
+          echo "Restored $(wc -c < "$state_path") bytes of budget from artifact $artifact_id."
 
       # The watchdog has no dependencies, so there is nothing to install; this
       # only proves the suite is green before acting on a production runtime.
@@ -83,6 +157,11 @@ jobs:
       # A rebuild is only attempted when explicitly asked for AND the detection
       # step said the studio is conclusively dead. --plan never creates a
       # sandbox, so a detect-only run costs nothing.
+      #
+      # This is the real path: no --dry-run. A successful rebuild commits and
+      # pushes the new url.json, and the exit code is passed through unchanged so
+      # a failed recovery or a rejected push fails the step and the job. The
+      # previous version ended in `exit 0`, which reported a broken run as green.
       - name: Recover when dead
         if: ${{ inputs.mode == 'rebuild' && steps.detect.outputs.exit_code != '0' }}
         id: recover
@@ -92,14 +171,11 @@ jobs:
           WATCHDOG_MAX_REBUILDS_PER_DAY: '4'
         run: |
           set +e
-          # --dry-run by default: this prints the URL it would publish without
-          # writing url.json. Replace with a real run once you are satisfied, or
-          # let publish-url-json.yml do the commit.
-          node watchdog/src/watchdog.mjs --dry-run | tee "$RUNNER_TEMP/watchdog.log"
+          node watchdog/src/watchdog.mjs | tee "$RUNNER_TEMP/watchdog.log"
           code=${PIPESTATUS[0]}
           set -e
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-          exit 0
+          exit "$code"
 
       - name: Summarise
         if: always()
@@ -110,11 +186,28 @@ jobs:
             echo "| field | value |"
             echo "|---|---|"
             echo "| mode | ${{ inputs.mode }} |"
+            echo "| budget restored from | ${{ steps.state.outputs.previous || 'none' }} |"
             echo "| detection exit | ${{ steps.detect.outputs.exit_code }} |"
             echo "| recovery exit | ${{ steps.recover.outputs.exit_code }} |"
             echo ""
             echo "Exit codes: 0 healthy, 2 rebuilt, 1 needs attention."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Saved whether or not the run succeeded. A failed run still spent quota -
+      # the sandbox is created before the build is attempted - so an upload
+      # limited to successful runs would let repeated failures bypass the daily
+      # cap entirely, which is the abuse the cap exists to prevent.
+      #
+      # The budget is uploaded after the cycle and restored before the next one,
+      # so a run reads the state as it stood at the end of its predecessor.
+      - name: Save the rebuild budget for the next run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: watchdog-state
+          path: ${{ runner.temp }}/watchdog-state.json
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: Keep the recovery log
         if: always()

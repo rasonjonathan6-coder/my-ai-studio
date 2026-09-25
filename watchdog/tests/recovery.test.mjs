@@ -249,6 +249,127 @@ describe('recoverStudio', () => {
     }
   });
 
+  it('orders local health, public URL resolution, public health, then publish', async () => {
+    // The ordering is the safety property: publishing an unverified address
+    // points every installed APK at a dead host. Asserting only that both
+    // happened (as the test above does) would still pass if publish ran first,
+    // so the sequence itself is recorded and checked here.
+    const events = [];
+    const client = fakeClient();
+    const originalGet = client.getSandbox.bind(client);
+    client.getSandbox = async (...args) => {
+      events.push('resolve-public-url');
+      return originalGet(...args);
+    };
+
+    const shell = fakeShell();
+    const originalRun = shell.run.bind(shell);
+    shell.run = async (command, options) => {
+      const result = await originalRun(command, options);
+      if (command.includes('127.0.0.1') && command.includes('/api/health')) {
+        events.push('local-health');
+      }
+      if (command.includes('git clone')) events.push('restore-repository');
+      if (command.includes('npm install')) events.push('install-and-build');
+      if (command.includes('LAUNCHED')) events.push('start-studio');
+      return result;
+    };
+
+    const restore = withFakeShell(shell);
+    try {
+      await recoverStudio({
+        client,
+        publish: async () => events.push('publish'),
+        sleep: noSleep,
+        healthProbe: async () => {
+          events.push('public-health');
+          return { ok: true, detail: 'service=my-ai-studio' };
+        },
+      });
+    } finally {
+      restore();
+    }
+
+    const at = (name) => {
+      const index = events.indexOf(name);
+      assert.notEqual(index, -1, `${name} never happened`);
+      return index;
+    };
+
+    assert.deepEqual(events, [
+      'restore-repository',
+      'install-and-build',
+      'start-studio',
+      'local-health',
+      'resolve-public-url',
+      'public-health',
+      'publish',
+    ]);
+    // Stated separately from the deepEqual so a failure says which invariant
+    // broke rather than just printing two arrays.
+    assert.ok(at('public-health') < at('publish'), 'publish ran before public health was confirmed');
+    assert.ok(at('local-health') < at('public-health'), 'public health ran before local health');
+    assert.ok(at('resolve-public-url') < at('public-health'), 'the public URL was probed before it was resolved');
+  });
+
+  it('publishes nothing and discards the sandbox when the publisher fails', async () => {
+    // The publish step is the last one, so its failure is the case most likely
+    // to leave a running runtime behind: the studio is up and healthy by then,
+    // and the sandbox is only removed because the rejection unwinds through
+    // the cleanup path. Without that, a failed push would strand a sandbox that
+    // nothing points at, spending quota.
+    const published = [];
+    const client = fakeClient();
+    const restore = withFakeShell(fakeShell());
+    try {
+      await assert.rejects(
+        () =>
+          recoverStudio({
+            client,
+            publish: async (url) => {
+              published.push(url);
+              throw new Error('url-json-update.mjs exited 1');
+            },
+            sleep: noSleep,
+            healthProbe: async () => ({ ok: true, detail: 'service=my-ai-studio' }),
+          }),
+        /url-json-update\.mjs exited 1/,
+      );
+      // It tried, and it threw: no success was returned to runCycle.
+      assert.deepEqual(published, ['https://studio-new.example']);
+      assert.ok(client.calls.includes('deleteSandbox:sb-test'), 'the sandbox was left running');
+    } finally {
+      restore();
+    }
+  });
+
+  it('reports a publish failure with its stage so the cause is identifiable', async () => {
+    const restore = withFakeShell(fakeShell());
+    try {
+      await assert.rejects(
+        () =>
+          recoverStudio({
+            client: fakeClient(),
+            publish: async () => {
+              throw new Error('publisher exploded');
+            },
+            sleep: noSleep,
+            healthProbe: async () => ({ ok: true, detail: 'ok' }),
+          }),
+        (err) => {
+          // The stage is the step name, so a log reader can find which step in
+          // recoverStudio threw without reading the message.
+          assert.equal(err.stage, 'publish new URL');
+          assert.equal(err.name, 'RecoveryError');
+          assert.match(err.message, /publisher exploded/);
+          return true;
+        },
+      );
+    } finally {
+      restore();
+    }
+  });
+
   it('sends no credential to the sandbox', async () => {
     // Placeholder values, deliberately shaped so they cannot be mistaken for a
     // real credential by a secret scanner or by a reader. What is being tested

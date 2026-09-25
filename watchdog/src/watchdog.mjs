@@ -22,21 +22,79 @@
 
 import { parseArgs } from 'node:util';
 import { realpathSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { log } from './log.mjs';
+import { log, redact } from './log.mjs';
 import { VERDICT, checkStudioHealth, loadSettings, readStudioUrl } from './discovery.mjs';
 import { OpenHandsClient } from './openhandsClient.mjs';
-import { recoverStudio } from './recovery.mjs';
+import { REPO_BRANCH, recoverStudio } from './recovery.mjs';
 import { evaluateBudget, readState, recordRebuild, writeState } from './state.mjs';
 
-/** Publishes the new URL by invoking the step 2 publisher, which re-verifies it. */
-function makePublisher({ repoRoot, dryRun }) {
+/** The only file an automated publish is ever allowed to touch. */
+const URL_JSON_FILE = 'url.json';
+
+/**
+ * Builds a publish failure. Carrying a stage lets the caller tell "the watchdog
+ * could not do its job" apart from "the studio looks unwell", which are the two
+ * outcomes a human reacts to differently.
+ */
+function publishFailure(message) {
+  const err = new Error(message);
+  err.stage = 'publish';
+  return err;
+}
+
+/**
+ * Runs one git command in the repository, capturing its output rather than
+ * inheriting this process's stdio.
+ *
+ * Capturing matters for two reasons here. The token is injected by the checkout
+ * action into the remote's configuration, not into a command line, so nothing
+ * needs to be echoed; and a command that prints a credential on failure would go
+ * straight into the CI transcript if stdio were inherited. What is captured is
+ * put through the same redaction every log line gets.
+ */
+function runGit(args, { cwd, env }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', args, { cwd, env });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('error', reject);
+    child.on('exit', (code) => resolve({ code, stdout, stderr: redact(stderr) }));
+  });
+}
+
+/**
+ * Publishes the new URL by writing url.json, then committing and pushing exactly
+ * that file.
+ *
+ * The commit and the push are part of publishing, not a follow-up. url.json is
+ * only useful once it is on the branch every installed APK reads, so a push that
+ * is rejected is a publish that failed rather than a detail to log and forget.
+ * Everything here throws on failure, which the recovery already treats like any
+ * other step failure - including discarding the sandbox it created, so a rejected
+ * push cannot leave a runtime behind.
+ *
+ * What is deliberately not done: no `git add .`, no `git add -A`. Only url.json
+ * is ever staged, and a commit is refused outright if anything else turns up
+ * staged, because an automated commit that swallowed a stray edit would be worse
+ * than no commit at all.
+ */
+export function makePublisher({ repoRoot, dryRun }) {
   return async (url) => {
     if (dryRun) {
       log.warn('dry-run: would publish url.json', { url });
       return;
     }
-    const { spawn } = await import('node:child_process');
+
+    // The step 2 publisher writes url.json and re-verifies /api/health itself, so
+    // a URL that stopped answering since the recovery probed it is never recorded.
     await new Promise((resolve, reject) => {
       const child = spawn(
         process.execPath,
@@ -45,9 +103,89 @@ function makePublisher({ repoRoot, dryRun }) {
       );
       child.on('error', reject);
       child.on('exit', (code) =>
-        code === 0 ? resolve() : reject(new Error(`url-json-update.mjs exited ${code}`)),
+        code === 0 ? resolve() : reject(publishFailure(`url-json-update.mjs exited ${code}`)),
       );
     });
+
+    const env = {
+      ...process.env,
+      // Never fall back to a credential prompt. In a runner there is no terminal
+      // to prompt, so a rejected push would otherwise consume its retries and
+      // still not fail the step.
+      GIT_TERMINAL_PROMPT: '0',
+    };
+
+    // actions/checkout does not guarantee a committer identity, and without one
+    // `git commit` fails with "Author identity unknown" - an automated publish
+    // that never lands. `git config user.email` exits 1 when the value is unset
+    // and 0 with empty output when it is set to nothing, so both have to count as
+    // "missing". It is set only in this repository's local config, so a
+    // developer's own identity is never overwritten.
+    const email = await runGit(['config', 'user.email'], { cwd: repoRoot, env });
+    if (email.code !== 0 || email.stdout.trim() === '') {
+      await runGit(['config', 'user.name', 'my-ai-studio watchdog'], { cwd: repoRoot, env });
+      // A GitHub noreply-style address: no personal mailbox is invented, and the
+      // commit is visibly attributable to the automation that made it.
+      await runGit(['config', 'user.email', 'watchdog@users.noreply.github.com'], { cwd: repoRoot, env });
+      log.info('set a local committer identity for the automated publish');
+    }
+
+    const added = await runGit(['add', '--', URL_JSON_FILE], { cwd: repoRoot, env });
+    if (added.code !== 0) {
+      throw publishFailure(`git add ${URL_JSON_FILE} failed: ${added.stderr.trim() || added.code}`);
+    }
+
+    // Exactly what would be committed, checked rather than assumed.
+    const staged = await runGit(['diff', '--cached', '--name-only'], { cwd: repoRoot, env });
+    if (staged.code !== 0) {
+      throw publishFailure(`could not read the staged files: ${staged.stderr.trim() || staged.code}`);
+    }
+    const files = staged.stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    const foreign = files.filter((file) => file !== URL_JSON_FILE);
+    if (foreign.length > 0) {
+      // Put the tree back exactly as it was found before reporting, so the next
+      // run starts from a clean state instead of inheriting our half-done stage.
+      await runGit(['reset', '--quiet'], { cwd: repoRoot, env });
+      await runGit(['checkout', '--', URL_JSON_FILE], { cwd: repoRoot, env });
+      throw publishFailure(
+        `refusing to commit files other than ${URL_JSON_FILE}: ${foreign.join(', ')}`,
+      );
+    }
+
+    if (files.length === 0) {
+      // url.json already carries this URL and status; url-json-update.mjs reports
+      // that case without rewriting the file. Nothing to publish.
+      log.info('url.json is already current; nothing to commit', { url });
+      return;
+    }
+
+    // The message names the new address, which is public by design, and nothing
+    // else. `--only` narrows the commit to url.json even though the index was
+    // just checked, so a change that slipped in between the two cannot ride along.
+    const commit = await runGit(
+      ['commit', '--only', '--message', `chore(watchdog): publish studio url ${url}`, '--', URL_JSON_FILE],
+      { cwd: repoRoot, env },
+    );
+    if (commit.code !== 0) {
+      throw publishFailure(`git commit failed: ${commit.stderr.trim() || commit.code}`);
+    }
+
+    // A commit hash is not a secret and is what makes the publish traceable from
+    // the CI output alone.
+    const head = await runGit(['rev-parse', '--short', 'HEAD'], { cwd: repoRoot, env });
+    log.info('committed the published url', { commit: head.stdout.trim() });
+
+    const pushed = await runGit(['push', 'origin', `HEAD:${REPO_BRANCH}`], { cwd: repoRoot, env });
+    if (pushed.code !== 0) {
+      // The branch is explicit rather than relying on upstream tracking, so a
+      // detached HEAD in CI still pushes to the branch the APKs read.
+      throw publishFailure(`git push to ${REPO_BRANCH} failed: ${pushed.stderr.trim() || pushed.code}`);
+    }
+    log.info('pushed the published url', { branch: REPO_BRANCH });
   };
 }
 

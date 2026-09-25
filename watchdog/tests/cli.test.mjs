@@ -21,13 +21,61 @@
 import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, before, describe, it } from 'node:test';
 
 const WATCHDOG = fileURLToPath(new URL('../src/watchdog.mjs', import.meta.url));
+
+/** Runs a git command and returns its stdout. */
+function gitOutput(cwd, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', args, { cwd });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (c) => {
+      stdout += c;
+    });
+    child.stderr.on('data', (c) => {
+      stderr += c;
+    });
+    child.on('error', reject);
+    child.on('close', (code) =>
+      code === 0 ? resolve(stdout) : reject(new Error(`git ${args.join(' ')}: ${stderr}`)),
+    );
+  });
+}
+
+/**
+ * Builds a real repository with a real bare remote, so that a publish performed
+ * against it commits and pushes for real. The publisher shells out to
+ * `scripts/url-json-update.mjs`, so the real script is installed into the fixture
+ * rather than a stand-in: the code under test is the code that ships.
+ */
+async function gitInitFixtureRepo(repo, { withRemote = true } = {}) {
+  await gitOutput(repo, ['init', '--quiet', '--initial-branch=main']);
+  await gitOutput(repo, ['config', 'user.email', 'watchdog@users.noreply.github.com']);
+  await gitOutput(repo, ['config', 'user.name', 'watchdog']);
+  await writeFile(
+    join(repo, 'url.json'),
+    `${JSON.stringify({ schema: 1, service: 'my-ai-studio', url: 'https://old.example', previousUrl: null, updatedAt: '2026-01-01T00:00:00.000Z', status: 'online' }, null, 2)}\n`,
+  );
+
+  await mkdir(join(repo, 'scripts'), { recursive: true });
+  const real = fileURLToPath(new URL('../../scripts/url-json-update.mjs', import.meta.url));
+  await writeFile(join(repo, 'scripts', 'url-json-update.mjs'), await readFile(real, 'utf8'));
+  await gitOutput(repo, ['add', '.']);
+  await gitOutput(repo, ['commit', '--quiet', '-m', 'fixture']);
+  if (!withRemote) return;
+  const remote = `${repo}-remote.git`;
+  // Run from the repository: the bare directory does not exist yet, and git
+  // creates it for the argument, but not as a working directory to spawn in.
+  await gitOutput(repo, ['init', '--quiet', '--bare', remote]);
+  await gitOutput(repo, ['remote', 'add', 'origin', remote]);
+  await gitOutput(repo, ['push', '--quiet', 'origin', 'main']);
+}
 
 /** What the studio should answer, per test. */
 const behaviour = { status: 502, body: null };
@@ -174,5 +222,301 @@ describe('watchdog CLI exit codes', () => {
     assert.notEqual(dead.code, alive.code);
     assert.equal(alive.code, 0);
     assert.equal(dead.code, 2);
+  });
+});
+
+/**
+ * Exit codes for the paths that only exist past detection.
+ *
+ * A full cycle cannot be exercised against the real service, but it can be
+ * exercised against a local stand-in for the two APIs the watchdog talks to:
+ * the app-server it creates a sandbox with, and the agent-server it sends shell
+ * commands to. Both are real HTTP servers on loopback, so the client code under
+ * test is the real client - only the answers are chosen here.
+ *
+ * No sandbox is created anywhere: the "sandbox" is an object in this process.
+ * The one thing that is deliberately not faked is the ordering the recovery
+ * enforces, because that ordering is what these codes report on.
+ */
+describe('watchdog CLI exit codes for a full cycle', () => {
+  const SANDBOX_ID = 'sb-cli-fake';
+
+  let api;
+  let apiUrl;
+  let cycleDir;
+  /** Flipped once the studio has been "started", so public health can pass. */
+  let studioStarted;
+
+  async function startFakeApi() {
+    const server = createServer((req, res) => {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      const json = (status, body) => {
+        const payload = JSON.stringify(body);
+        res.writeHead(status, { 'content-type': 'application/json' }).end(payload);
+      };
+
+      if (url.pathname === '/url.json') {
+        return json(200, {
+          schema: 1,
+          service: 'my-ai-studio',
+          url: apiUrl,
+          previousUrl: null,
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          status: 'online',
+        });
+      }
+
+      // The studio's health endpoint. Dead until the studio is started, which
+      // is what makes detection conclude "dead" and recovery conclude "alive".
+      if (url.pathname === '/api/health') {
+        if (!studioStarted) {
+          res.writeHead(502, { 'content-type': 'text/plain' }).end('Bad Gateway');
+          return;
+        }
+        return json(200, { ok: true, service: 'my-ai-studio', version: '1.0.0' });
+      }
+
+      if (url.pathname === '/api/v1/users/me') return json(200, { id: 'fixture-user' });
+
+      if (url.pathname === '/api/v1/sandboxes' && req.method === 'POST') {
+        return json(200, {
+          id: SANDBOX_ID,
+          status: 'RUNNING',
+          session_api_key: 'fixture-session-key-not-a-real-value',
+          exposed_urls: [
+            { name: 'AGENT_SERVER', port: 60000, url: apiUrl },
+            { name: 'WORKER_1', port: 12000, url: apiUrl },
+          ],
+        });
+      }
+
+      if (url.pathname === '/api/v1/sandboxes/search') {
+        return json(200, {
+          items: [
+            {
+              id: SANDBOX_ID,
+              status: 'RUNNING',
+              session_api_key: 'fixture-session-key-not-a-real-value',
+              exposed_urls: [
+                { name: 'AGENT_SERVER', port: 60000, url: apiUrl },
+                { name: 'WORKER_1', port: 12000, url: apiUrl },
+              ],
+            },
+          ],
+        });
+      }
+
+      if (url.pathname.startsWith('/api/v1/sandboxes/') && req.method === 'DELETE') {
+        return json(200, { success: true });
+      }
+
+      if (url.pathname === '/api/bash/execute_bash_command') {
+        let raw = '';
+        req.on('data', (chunk) => {
+          raw += chunk;
+        });
+        req.on('end', () => {
+          let command = '';
+          try {
+            command = JSON.parse(raw).command ?? '';
+          } catch {
+            command = '';
+          }
+          const reply = (stdout, exitCode = 0, stderr = '') =>
+            json(200, { exit_code: exitCode, stdout, stderr });
+
+          if (command.includes('git clone')) return reply('Cloning into project...');
+          if (command.includes('npm install')) {
+            if (api.failBuild) return reply('EXIT=1');
+            return reply('EXIT=0');
+          }
+          if (command.includes('LAUNCHED')) {
+            studioStarted = true;
+            return reply('LAUNCHED');
+          }
+          if (command.includes('127.0.0.1') && command.includes('/api/health')) return reply('READY\n');
+          return reply('ok');
+        });
+        return undefined;
+      }
+
+      return json(404, { detail: 'not found' });
+    });
+    await new Promise((done) => server.listen(0, '127.0.0.1', done));
+    return { server, url: `http://127.0.0.1:${server.address().port}` };
+  }
+
+  /**
+   * Runs a real cycle against the fake APIs.
+   *
+   * `mode` chooses the argument the workflow would pass: `plan` is detection
+   * only, `dry-run` rebuilds but writes nothing, and `publish` is the real
+   * recovery path - no --dry-run - which commits and pushes url.json.
+   */
+  async function runCycleCli({ mode = 'rebuild', env = {}, seedState = null, extraArgs = [] } = {}) {
+    const args = mode === 'plan' ? ['--plan'] : mode === 'publish' ? [] : ['--dry-run'];
+    const child = spawn(process.execPath, [WATCHDOG, ...args, ...extraArgs], {
+      env: {
+        ...process.env,
+        URL_JSON_URL: `${apiUrl}/url.json`,
+        OPENHANDS_BASE_URL: apiUrl,
+        OPENHANDS_API_KEY: 'fixture-openhands-key-not-a-real-value',
+        WATCHDOG_HEALTH_ATTEMPTS: '1',
+        WATCHDOG_HEALTH_DELAY_MS: '0',
+        WATCHDOG_MIN_REBUILD_GAP_MS: '0',
+        WATCHDOG_STATE_PATH: join(cycleDir, 'state.json'),
+        MY_AI_STUDIO_DOMAIN: '',
+        ...env,
+      },
+    });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => child.kill('SIGKILL'), 120_000);
+    child.stdout.on('data', (c) => {
+      stdout += c;
+    });
+    child.stderr.on('data', (c) => {
+      stderr += c;
+    });
+    const code = await new Promise((done, fail) => {
+      child.on('error', fail);
+      child.on('close', done);
+    });
+    clearTimeout(timer);
+    return { code, stdout, stderr, output: `${stdout}${stderr}` };
+  }
+
+  before(async () => {
+    const started = await startFakeApi();
+    api = started;
+    apiUrl = started.url;
+    cycleDir = await mkdtemp(join(tmpdir(), 'watchdog-cycle-cli-'));
+  });
+
+  after(async () => {
+    await new Promise((done) => api.server.close(done));
+    await rm(cycleDir, { recursive: true, force: true });
+  });
+
+  it('exits 2 for a rebuild that completed', async () => {
+    // The whole point of the plan-mode fix: a completed rebuild must not report
+    // the code that means healthy. The cycle is real - detection, sandbox
+    // creation, clone, install, start, both health checks - with the APIs
+    // answered locally and url.json left alone by --dry-run.
+    studioStarted = false;
+    const { code, output } = await runCycleCli({ mode: 'rebuild' });
+
+    assert.match(output, /studio is dead/);
+    assert.match(output, /sandbox created/);
+    assert.match(output, /public health confirmed/);
+    assert.match(output, /dry-run: would publish url\.json/);
+    assert.match(output, /cycle finished/);
+    assert.equal(code, 2, `a completed rebuild must exit 2, got ${code}`);
+  });
+
+  it('never reports a rebuild with exit 0', async () => {
+    // Stated on its own because it is the invariant the workflow depends on:
+    // exit 0 must mean "nothing needed doing", never "something was done".
+    studioStarted = false;
+    const { code } = await runCycleCli({ mode: 'rebuild' });
+    assert.notEqual(code, 0);
+  });
+
+  it('exits 1 when the rebuild budget is exhausted', async () => {
+    studioStarted = false;
+    const statePath = join(cycleDir, 'state.json');
+    await writeFile(
+      statePath,
+      `${JSON.stringify({
+        rebuilds: [{ at: new Date().toISOString(), url: 'https://earlier.example', sandboxId: 'sb-earlier' }],
+      })}\n`,
+      'utf8',
+    );
+    const { code, output } = await runCycleCli({
+      mode: 'rebuild',
+      env: { WATCHDOG_MAX_REBUILDS_PER_DAY: '1' },
+    });
+    await rm(statePath, { force: true });
+
+    assert.match(output, /refusing to rebuild/);
+    assert.match(output, /budget exhausted/);
+    assert.equal(code, 1, `a blocked cycle must exit 1, got ${code}`);
+  });
+
+  it('exits 1 when the recovery fails, and publishes nothing', async () => {
+    studioStarted = false;
+    api.failBuild = true;
+    try {
+      const { code, output } = await runCycleCli({ mode: 'rebuild' });
+
+      assert.match(output, /install or build failed/);
+      assert.match(output, /discarded failed sandbox/);
+      assert.doesNotMatch(output, /would publish url\.json/);
+      assert.doesNotMatch(output, /cycle finished/);
+      assert.equal(code, 1, `a failed recovery must exit 1, got ${code}`);
+    } finally {
+      api.failBuild = false;
+    }
+  });
+
+  it('publishes url.json for real when run without --dry-run', async () => {
+    // The path the workflow takes. Everything before this point is tested in
+    // dry-run, which cannot show whether the commit or the push works at all:
+    // dry-run returns before either is reached. This runs the real thing against
+    // a real repository and checks what git actually recorded.
+    const repo = await mkdtemp(join(tmpdir(), 'watchdog-publish-'));
+    try {
+      await gitInitFixtureRepo(repo);
+      studioStarted = false;
+
+      const { code, output } = await runCycleCli({
+        mode: 'publish',
+        extraArgs: ['--repo-root', repo],
+      });
+
+      assert.match(output, /studio is dead/);
+      assert.match(output, /public health confirmed/);
+      assert.match(output, /committed the published url/);
+      assert.match(output, /pushed the published url/);
+      assert.doesNotMatch(output, /dry-run/);
+      assert.equal(code, 2, `a completed rebuild must exit 2, got ${code}`);
+
+      // url.json really changed, and only url.json.
+      const written = JSON.parse(await readFile(join(repo, 'url.json'), 'utf8'));
+      assert.equal(written.url, apiUrl);
+      const changed = await gitOutput(repo, ['show', '--name-only', '--format=', 'HEAD']);
+      assert.deepEqual(changed.trim().split('\n').filter(Boolean), ['url.json']);
+
+      // And the commit reached the remote, which is what "published" means for
+      // an installed APK reading raw.githubusercontent.com.
+      const remote = await gitOutput(`${repo}-remote.git`, ['log', '--format=%s', 'main']);
+      assert.match(remote, /chore\(watchdog\): publish studio url /);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+      await rm(`${repo}-remote.git`, { recursive: true, force: true });
+    }
+  });
+
+  it('fails the run when the push cannot land, and discards the sandbox', async () => {
+    // A publish that cannot reach the remote is a failed publish. The exit code
+    // has to say so, because the job's only other signal is that code.
+    const repo = await mkdtemp(join(tmpdir(), 'watchdog-nopush-'));
+    try {
+      await gitInitFixtureRepo(repo, { withRemote: false });
+      studioStarted = false;
+
+      const { code, output } = await runCycleCli({
+        mode: 'publish',
+        extraArgs: ['--repo-root', repo],
+      });
+
+      assert.match(output, /git push to main failed/);
+      assert.match(output, /discarded failed sandbox/);
+      assert.doesNotMatch(output, /cycle finished/);
+      assert.notEqual(code, 0, 'a failed push must not exit 0');
+      assert.equal(code, 1, `a failed publish must exit 1, got ${code}`);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
   });
 });

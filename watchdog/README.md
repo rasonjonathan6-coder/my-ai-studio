@@ -24,6 +24,34 @@ probe {url}/api/health   (with retries)
 `alive` and `unknown` both mean "change nothing". Only a conclusive failure
 starts a rebuild.
 
+## Publishing the new URL
+
+A rebuilt runtime is only useful if an installed APK can find it, and the APK
+finds it by reading `url.json` from the branch. So the last step of a recovery is
+not a log line: it writes `url.json`, commits exactly that file, and pushes it.
+
+Three constraints make that safe to run unattended:
+
+- **Only `url.json` is ever staged.** No `git add .`, no `git add -A`. If
+  anything else turns up staged, the publish is refused, the index is reset and
+  `url.json` is restored - an automated commit that swept up a stray edit would
+  publish code nobody reviewed.
+- **The URL is verified twice.** `scripts/url-json-update.mjs` re-probes
+  `/api/health` before writing, after the recovery has already confirmed the URL
+  publicly, so a host that died in between is never recorded.
+- **A rejected push is a failed publish.** It throws, which unwinds through the
+  recovery's cleanup and discards the sandbox it created. A rebuilt runtime whose
+  address never reached the branch would otherwise linger, spending quota, with
+  nothing pointing at it.
+
+The commit is attributable and carries no credential: the message is
+`chore(watchdog): publish studio url <url>`, and `url.json` itself holds a public
+URL and nothing else. A committer identity is set locally only when the checkout
+did not provide one, so a developer's own identity is never overwritten.
+
+`--dry-run` stops before any of this and prints what it would publish. The
+workflow uses the real path, not `--dry-run`.
+
 ## Why "dead" is hard to call
 
 A sleeping laptop, a DNS hiccup and a restarting process all look like a failure

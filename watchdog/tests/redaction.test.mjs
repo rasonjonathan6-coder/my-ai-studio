@@ -114,3 +114,91 @@ describe('redactValue', () => {
     assert.match(out.note, /the key is/);
   });
 });
+
+/**
+ * The publication path specifically.
+ *
+ * A recovery ends by writing url.json and by printing a line about what it
+ * wrote, and both are read by things nobody controls - the file is world
+ * readable in a public repository, and the line lands in a CI transcript. So
+ * the four credentials named in the publication checklist are each checked
+ * twice: once against redact(), and once against a line emitted through the
+ * real logging path, which is the code that actually runs during a publish.
+ */
+describe('redaction on the publication path', () => {
+  // Assembled at runtime for the same reason as the fixtures above: a literal
+  // credential-shaped string in a tracked file is what a secret scanner flags.
+  const publicationSecrets = {
+    OPENROUTER_API_KEY: `sk-or-v1-${'9876543210'.repeat(3)}`,
+    OPENHANDS_API_KEY: `sk-oh-${'Z'.repeat(24)}`,
+    GITHUB_TOKEN: `ghp_${'Q'.repeat(30)}`,
+    DATABASE_URL: 'postgres://publishinguser:publishingpassword@db.example:5432/studio',
+  };
+
+  /** Runs a callback with stdout and stderr captured. */
+  function captureOutput(fn) {
+    const written = [];
+    const realOut = process.stdout.write;
+    const realErr = process.stderr.write;
+    process.stdout.write = (chunk) => written.push(String(chunk));
+    process.stderr.write = (chunk) => written.push(String(chunk));
+    try {
+      fn();
+    } finally {
+      process.stdout.write = realOut;
+      process.stderr.write = realErr;
+    }
+    return written.join('');
+  }
+
+  for (const [name, value] of Object.entries(publicationSecrets)) {
+    const sensitive = name === 'DATABASE_URL' ? 'publishingpassword' : value;
+
+    it(`never prints ${name} in an emitted log line`, async () => {
+      setEnv(name, value);
+      // Imported lazily so the module sees the environment variable set above.
+      const { log } = await import('../src/log.mjs');
+      // Deliberately logged as a nested field, not as a bare string: that is
+      // how a value from an API response would arrive, and it is the path where
+      // a single serialisation mistake would expose it.
+      const output = captureOutput(() => {
+        log.info('publishing url.json', { url: 'https://studio.example', detail: { echo: value } });
+        log.error('publication failed', { error: `failed with ${value}` });
+      });
+
+      assert.doesNotMatch(output, new RegExp(sensitive));
+      assert.match(output, /publishing url\.json/);
+      // The failure line still has to say something useful.
+      assert.match(output, /publication failed/);
+    });
+
+    it(`never prints ${name} in a redacted value tree`, () => {
+      setEnv(name, value);
+      const out = redactValue({ url: 'https://studio.example', echo: value });
+      assert.doesNotMatch(JSON.stringify(out), new RegExp(sensitive));
+      assert.equal(out.url, 'https://studio.example');
+    });
+  }
+
+  it('keeps a published payload free of every named credential', () => {
+    // The shape of what url.json holds. Nothing here reads a credential, so a
+    // secret could only appear by accident - which is exactly what this pins.
+    for (const [name, value] of Object.entries(publicationSecrets)) setEnv(name, value);
+    const payload = {
+      schema: 1,
+      service: 'my-ai-studio',
+      url: 'https://studio.example',
+      previousUrl: 'https://old.example',
+      updatedAt: new Date().toISOString(),
+      status: 'online',
+    };
+    const serialised = redact(JSON.stringify(payload, null, 2));
+
+    for (const [name, value] of Object.entries(publicationSecrets)) {
+      const sensitive = name === 'DATABASE_URL' ? 'publishingpassword' : value;
+      assert.doesNotMatch(serialised, new RegExp(sensitive), `${name} appeared in the payload`);
+    }
+    // And the payload survived intact, so the redaction did not mangle it.
+    assert.deepEqual(JSON.parse(serialised), payload);
+  });
+});

@@ -12,16 +12,46 @@ cd watchdog && npm test
 ```
 
 ```
-ℹ tests 63
-ℹ suites 12
-ℹ pass 63
+ℹ tests 162
+ℹ suites 33
+ℹ pass 162
 ℹ fail 0
 ```
 
-The suite covers the decision logic, the loop guard, secret redaction and the
-recovery steps. The OpenHands API and the sandbox are faked in the suite, because
-a test cannot wait for a real sandbox to fail a build; those paths are covered by
-the live runs below instead.
+The suite covers the decision logic, the loop guard, secret redaction, the
+recovery steps, and the publish itself. The OpenHands API and the sandbox are
+faked in the suite, because a test cannot wait for a real sandbox to fail a
+build; those paths are covered by the live runs below instead.
+
+The publish tests are the exception, and deliberately not faked: they build a
+real git repository with a real bare remote in a temp directory and run the real
+`makePublisher`, so the commit and the push genuinely happen and the assertions
+read what git recorded. `tests/publish.test.mjs` covers the write, the commit
+scoped to `url.json`, the refusal when a foreign file is staged (and the rollback
+that undoes it), a rejected push failing the publish, dry-run touching nothing,
+and no credential reaching `url.json` or the log. `tests/cli.test.mjs` runs the
+whole cycle through the real command line twice: once succeeding, to check that
+`url.json` really changed on the remote, and once with no remote, to check that a
+push that cannot land exits non-zero and discards the sandbox.
+
+### Publishing wiring
+
+The publish step is now real rather than `--dry-run`, and the workflow carries
+`contents: write` for it. Both are pinned by `tests/ci-triggers.test.mjs`,
+together with the two failure modes they invite: an unused `--dry-run` (which
+would report success while publishing nothing) and an unconditional `exit 0`
+(which would report a failed recovery as green). Sabotaging either one, or
+downgrading the permission, fails the suite.
+
+The commit is narrowed to `url.json` by the publisher itself, and a committer
+identity is set locally only when the checkout did not supply one. Verified by
+running the real publisher against a repository with a real remote.
+
+Two things about this path are **not tested**: the push has not been exercised
+against GitHub itself (only against a local bare remote, which fails and succeeds
+for the same reasons but over a different transport), and the workflow has not
+been dispatched with `mode=rebuild`, because that spends quota and creates a
+sandbox.
 
 ## Live runs
 
@@ -201,3 +231,15 @@ not catch.
   recovered runtime was verified running without them. Whether the studio works
   fully once they are configured on a new runtime follows from the studio's own
   tests, not from this watchdog's runs.
+
+- **Publishing over GitHub's own transport.** The commit and the push are
+  exercised against a real local bare remote, which is where the logic lives - the
+  scoping to `url.json`, the refusal, the rollback, the failure on a rejected
+  push. What has not been exercised is the push against GitHub with the checkout's
+  credential, or `contents: write` on the runner. Those need a `mode=rebuild`
+  dispatch, which creates a sandbox and spends quota.
+
+- **The live runs above were recorded with `--dry-run`.** They describe the
+  recovery before the publish step was wired to commit and push, so the "publish
+  new URL" row in each reads "dry-run, not written". The wiring itself is covered
+  by the suite, not by those runs.

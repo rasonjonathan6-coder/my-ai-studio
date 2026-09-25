@@ -146,9 +146,15 @@ async function main() {
     publish: makePublisher({ repoRoot, dryRun: values['dry-run'] }),
   });
 
-  // Exit codes are what an external scheduler acts on: 0 healthy, 2 rebuilt,
-  // 1 anything that needs a human to look.
-  if (result.action === 'rebuilt') process.exitCode = 2;
+  // Exit codes are what an external scheduler acts on: 0 healthy, 2 a runtime
+  // was replaced or is about to be, 1 anything that needs a human to look.
+  //
+  // plan-only shares rebuild's code on purpose. A caller that gates recovery on
+  // "the check did not say healthy" - the workflow does exactly that with
+  // exit_code != '0' - must see the same signal whether the rebuild was
+  // performed or merely planned, otherwise a dead studio reads as healthy and
+  // the recovery it was meant to trigger never runs.
+  if (result.action === 'rebuilt' || result.action === 'would-rebuild') process.exitCode = 2;
   else if (result.action === 'blocked') process.exitCode = 1;
 }
 

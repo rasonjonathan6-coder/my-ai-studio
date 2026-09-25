@@ -1469,3 +1469,110 @@ compromised and rotated:
 The old password is no longer valid over TCP. Any deployment elsewhere that
 still references it will need the new value.
 
+---
+
+## Addendum - 2026-09-25: permanent public host
+
+### What was requested
+
+Deploy My AI Studio to a permanent public host, reachable independently of
+OpenHands, keeping the verified architecture, and with server-side credentials
+that are never committed.
+
+### What was done
+
+**Secrets can now live outside the checkout - PASS.** Two gaps blocked this and
+both are closed:
+
+1. `scripts/deploy-production.sh` refused to run without `.env`. It now reads
+   each value from the process environment first and falls back to `.env`, so a
+   host that injects secrets needs no file.
+2. Compose's `env_file` only reads a file; host variables never reached the
+   backend container. `docker-compose.prod.yml` now forwards the secrets the
+   backend consumes, via `${VAR:-}`, so an injected value passes through and
+   `.env` still works when nothing is injected.
+
+Rehearsed for real, not asserted: with a full copy of the tree and **no `.env` on
+disk**, running `scripts/deploy-production.sh` with the secrets supplied only as
+environment variables printed:
+
+```
+PASS  frontend (200)
+PASS  API health (200)
+PASS  unauthenticated API is rejected (401)
+PASS  database reachable
+PASS  sandboxed command execution
+PASS  no secret in the served bundle
+
+PRODUCTION DEPLOYMENT: PASS
+```
+
+and created no `.env`. `deploy/my-ai-studio.service` turns that into a unit:
+secrets live in a root-owned `0600 /etc/my-ai-studio/secrets.env` outside the
+repository, so the working tree stays clean. `systemd-analyze verify` exits 0.
+
+**External managed Postgres - works, untested against a live instance.**
+Overlapping a compose file that sets `DATABASE_URL` to an external host and
+`DATABASE_SSL: 'true'` renders correctly (verified with a placeholder host), so
+the Supabase path in `SUPABASE_SETUP.md` needs no source change. It has not been
+run against a real Supabase project, so it stays NOT TESTED.
+
+**Permanent public host - NOT AVAILABLE.** This is the one part of the objective
+that is genuinely blocked, and it is blocked on inputs, not on code:
+
+- This machine has no public address. It is on the private address `10.2.33.23`
+  behind the platform's reverse proxy (`work-1-...prod-runtime.all-hands.dev`
+  resolves to `34.27.211.76`, a different machine). Nothing on this host can be
+  made reachable on the public internet by configuration alone.
+- No provider CLI or host credential exists here: `fly`, `render`, `railway`,
+  `vercel`, `netlify`, `wrangler`, `doctl`, `oci`, `aws`, `gcloud`, `az`,
+  `kubectl`, `helm`, `ssh`, `scp`, `ngrok`, `cloudflared` and `tailscale` are all
+  absent, and there is no `~/.ssh`.
+- The Cloudflare token that is available reaches Workers AI and lists Pages
+  projects, but cannot create one (`Authentication error`), and the account has
+  zero zones with R2 not enabled, so it cannot host the stack either.
+
+Deploying further needs one of: a host plus its access credentials, or a
+provider token scoped to create the resource. Both are the user's to supply.
+The temporary OpenHands runtime URL remains live and healthy (`/api/health` 200)
+in the meantime, but it is not a permanent host.
+
+### Credential handling during this addendum
+
+`JWT_SECRET` was exposed in this session's terminal transcript by a
+`compose config` dump (a mistake - values are no longer printed, only lengths).
+It has been rotated to a fresh 64-hex value in `.env` and the stack redeployed on
+it; health confirmed 200 afterwards. The variable names are listed in this
+repository but no secret value is.
+
+An earlier scratch directory that briefly held a platform-injected provider key
+was removed with `shred` after the local experiment finished.
+
+### Status summary
+
+| Item | State |
+| --- | --- |
+| Secrets server-side, no committed `.env` | PASS |
+| Production stack, env-only secrets, no `.env` file | PASS |
+| External managed Postgres (Supabase) path | NOT TESTED (renders correctly) |
+| Permanent public host | NOT AVAILABLE (no host or provider credential) |
+| App reachable on the temporary runtime URL | PASS |
+
+### What to run once a host exists
+
+```bash
+# on the target host
+git clone https://github.com/rasonjonathan6-coder/my-ai-studio /opt/my-ai-studio
+cd /opt/my-ai-studio
+sudo install -m 0644 deploy/my-ai-studio.service /etc/systemd/system/
+sudo install -d -m 0700 /etc/my-ai-studio
+sudo install -m 0600 /dev/null /etc/my-ai-studio/secrets.env
+sudo editor /etc/my-ai-studio/secrets.env    # keys listed in the unit header
+sudo systemctl daemon-reload && sudo systemctl enable --now my-ai-studio
+journalctl -u my-ai-studio -f
+```
+
+Open the host's ports 80 and 443, point DNS at it, and
+`scripts/deploy-production.sh` verifies the stack itself - it fails loudly rather
+than reporting PASS if the frontend, API, database or sandbox does not come up.
+

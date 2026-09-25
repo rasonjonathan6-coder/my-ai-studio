@@ -412,3 +412,47 @@ INSTALL_ANDROID_TOOLCHAIN=1
 With a writable cache the fallback is not logged and builds succeed. Symptom to
 watch for: the `not writable` warning appearing immediately before a build
 failure is the whole diagnosis.
+
+## Redeploying after changing `.env`
+
+`docker compose ... up -d` reuses an existing container, so a changed `.env`
+value does not reach a running service. A plain `restart` is not enough either:
+the container keeps its original environment. Use `--force-recreate` on the
+service you changed:
+
+```
+docker compose -p masprod -f docker-compose.prod.yml up -d --force-recreate backend
+```
+
+Verify what the container actually received rather than what the file says: a
+32-hex secret is easy to eyeball as unchanged.
+
+```
+docker exec masprod-backend-1 sh -c 'printf "%s" "$DATABASE_URL"' | md5sum
+printf "%s" "$(sed -n 's/^DATABASE_URL=//p' .env)" | md5sum
+```
+
+If those digests differ, the container is stale.
+
+### `sudo -E` leaks the shell's environment into compose
+
+`POSTGRES_PASSWORD` and `DATABASE_URL` are registered credentials here, so they
+are auto-exported into every command. `sudo -E` forwards them, and an exported
+variable takes precedence over `.env` during compose interpolation — so a
+deployment can be recreated with a stale password while `.env` holds the new
+one. Strip them explicitly:
+
+```
+sudo -E env -u POSTGRES_PASSWORD -u DATABASE_URL docker compose ... up -d --force-recreate backend
+```
+
+### Verifying a database password
+
+Do not judge this with `psql -c 'select 1'` inside the postgres container: its
+`pg_hba.conf` trusts local connections, so any password string succeeds. The
+real signal is the backend probe, which connects over TCP:
+
+```
+GET /api/system/status   # postgres probe: AVAILABLE | ERROR "password authentication failed"
+```
+

@@ -23,20 +23,21 @@
 # environment. Nothing else changes.
 #
 # Required contents of /etc/my-ai-studio/secrets.env - see .env.production.example
-# for the full list and the notes on each value:
+# for the full list and the notes on each value. (Names and how to generate each
+# value; the file needs the usual name=value form.)
 #
-#   POSTGRES_USER=myaistudio
-#   POSTGRES_DB=myaistudio
-#   POSTGRES_PASSWORD=<openssl rand -hex 32>
-#   JWT_SECRET=<openssl rand -hex 32>
-#   MY_AI_STUDIO_CREDENTIAL_KEY=<openssl rand -hex 32, different from JWT_SECRET>
-#   OPENROUTER_API_KEY=<your key>
-#   MY_AI_STUDIO_DOMAIN=studio.example.com
-#   ACME_EMAIL=you@example.com
-#   DATA_ROOT=/srv/my-ai-studio
-#   CADDYFILE=deploy/Caddyfile            # or deploy/Caddyfile.public behind an edge
-#   WEB_HTTP_PORT=80
-#   WEB_HTTPS_PORT=443
+#   POSTGRES_USER                     myaistudio
+#   POSTGRES_DB                       myaistudio
+#   POSTGRES_PASSWORD                 output of: openssl rand -hex 32
+#   JWT_SECRET                        output of: openssl rand -hex 32
+#   MY_AI_STUDIO_CREDENTIAL_KEY       output of: openssl rand -hex 32, and different from JWT_SECRET
+#   OPENROUTER_API_KEY                your key
+#   MY_AI_STUDIO_DOMAIN               studio.example.com
+#   ACME_EMAIL                        you@example.com
+#   DATA_ROOT                         /srv/my-ai-studio
+#   CADDYFILE                         deploy/Caddyfile, or deploy/Caddyfile.public behind an edge
+#   WEB_HTTP_PORT                     80
+#   WEB_HTTPS_PORT                    443
 #
 # Do not set DOCKER_GID here: deploy-production.sh derives it from the socket and
 # overrides whatever the environment holds.

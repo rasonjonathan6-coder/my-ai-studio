@@ -50,6 +50,27 @@ services:
       NODE_ENV: production
       PORT: '8080'
       HOST: 0.0.0.0
+      # Secrets can come from the host environment (systemd Environment=, or a
+      # platform's secret store) instead of a plaintext .env. `env_file` alone
+      # does not do this: it only reads the file. These pass an injected value
+      # through, and stay empty when nothing was injected, so .env still works.
+      # `:-` (unset-or-empty) rather than `-` so a blank host variable does not
+      # override a value set in .env.
+      JWT_SECRET: ${JWT_SECRET:-}
+      MY_AI_STUDIO_CREDENTIAL_KEY: ${MY_AI_STUDIO_CREDENTIAL_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      CEREBRAS_API_KEY: ${CEREBRAS_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
+      CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+      CHUTES_API_KEY: ${CHUTES_API_KEY:-}
+      SAMBANOVA_API_KEY: ${SAMBANOVA_API_KEY:-}
+      MY_AI_STUDIO_GITHUB_TOKEN: ${MY_AI_STUDIO_GITHUB_TOKEN:-}
       DATABASE_URL: postgres://${POSTGRES_USER:-myaistudio}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-myaistudio}
       DATABASE_SSL: 'false'
       WORKSPACE_PATH: /data/workspaces

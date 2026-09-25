@@ -5,8 +5,8 @@
 #
 #   ./scripts/deploy-production.sh
 #
-# Reads .env for secrets and configuration. Never prints secret values: only
-# whether each one is set.
+# Reads configuration from the environment or .env (environment wins). Never
+# prints secret values: only whether each one is set.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -23,18 +23,26 @@ step() { printf '\n=== %s ===\n' "$1"; }
 # --- Preflight --------------------------------------------------------------
 
 step 'Preflight: environment'
-if [ ! -f .env ]; then
-  echo 'MISSING .env: copy .env.production.example to .env and fill it in.'
-  exit 1
-fi
 
-# Read .env without exporting it, so no secret reaches this shell's environment
-# (and therefore not any subprocess that dumps its environment).
-env_value() { sed -n "s/^$1=//p" .env | tail -1; }
+# Values may come from the process environment (systemd Environment=,
+# EnvironmentFile=, or a platform's secret store) or from .env. The environment
+# wins, so a host that injects secrets needs no plaintext .env in the checkout.
+# Values read from .env are not exported, so they stay out of the environment of
+# every subprocess this script starts.
+env_value() {
+  local injected
+  injected="$(printenv "$1" 2>/dev/null || true)"
+  if [ -n "$injected" ]; then printf '%s' "$injected"; return; fi
+  if [ -f .env ]; then sed -n "s/^$1=//p" .env | tail -1; fi
+}
+
+if [ ! -f .env ]; then
+  echo 'No .env file: expecting configuration from the environment.'
+fi
 
 if [ -z "$DOMAIN" ]; then DOMAIN="$(env_value MY_AI_STUDIO_DOMAIN)"; fi
 if [ -z "$DOMAIN" ]; then
-  echo 'MISSING MY_AI_STUDIO_DOMAIN in .env. It must be the hostname users will open.'
+  echo 'MISSING MY_AI_STUDIO_DOMAIN: set it in the environment or in .env.'
   exit 1
 fi
 echo "domain: $DOMAIN"
@@ -65,7 +73,7 @@ fi
 # volume could not provide one. Configurable so it can point at a larger disk.
 DATA_ROOT="$(env_value DATA_ROOT)"
 if [ -z "$DATA_ROOT" ]; then
-  echo 'MISSING DATA_ROOT in .env (host directory for project data).'
+  echo 'MISSING DATA_ROOT: set it in the environment or in .env (host directory for project data).'
   exit 1
 fi
 sudo mkdir -p "$DATA_ROOT/workspaces" "$DATA_ROOT/storage"

@@ -171,7 +171,14 @@ jobs:
           WATCHDOG_MAX_REBUILDS_PER_DAY: '4'
         run: |
           set +e
-          node watchdog/src/watchdog.mjs | tee "$RUNNER_TEMP/watchdog.log"
+          # stderr is merged into the pipe on purpose. The watchdog logs
+          # structured lines to stderr, so a plain `node ... | tee` captured
+          # stdout only and uploaded an empty file: the run that failed on a
+          # missing credential left a 0-byte watchdog-log artifact, which is
+          # exactly the case the artifact exists to explain. `2>&1` keeps node
+          # as the first pipeline element, so PIPESTATUS[0] is still its exit
+          # code.
+          node watchdog/src/watchdog.mjs 2>&1 | tee "$RUNNER_TEMP/watchdog.log"
           code=${PIPESTATUS[0]}
           set -e
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"

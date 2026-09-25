@@ -382,6 +382,26 @@ describe('workflow: the recovery path publishes for real', () => {
     assert.match(script, /echo "exit_code=\$code" >> "\$GITHUB_OUTPUT"/);
   });
 
+  it('captures stderr in the log it uploads, not just stdout', async () => {
+    // The watchdog writes error and warning lines to stderr (log.mjs picks the
+    // stream by level), so a bare `node ... | tee file` recorded only stdout.
+    // Run 36143455348 failed on a missing credential and uploaded a 0-byte
+    // watchdog-log artifact - the exact failure the artifact is meant to
+    // explain. `2>&1` is what makes the uploaded log worth keeping.
+    const script = await stepScript('Recover when dead');
+    const pipeline = script.split('\n').find((line) => /watchdog\.mjs/.test(line));
+    assert.ok(pipeline, 'the recovery step no longer runs the watchdog');
+    assert.match(
+      pipeline,
+      /watchdog\.mjs\s+2>&1\s*\|/,
+      'stderr is not merged into the uploaded log, so warnings and errors are lost',
+    );
+    // node must stay the first element of the pipeline, otherwise
+    // PIPESTATUS[0] is some other command's code and a failed recovery would
+    // be reported as a success.
+    assert.match(pipeline, /^\s*node\s/, "the exit code captured is not the watchdog's");
+  });
+
   it('keeps the schedule commented out', async () => {
     // Enabling this lets the recovery, the commit and the push all run
     // unattended. That is an operational decision, not a side effect of a commit.

@@ -1,0 +1,15 @@
+{
+  "name": "my-ai-studio-watchdog",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "External watchdog for My AI Studio. Verifies the studio URL published in url.json and rebuilds a runtime only when the studio is genuinely dead.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"tests/**/*.test.mjs\"",
+    "detect": "node src/watchdog.mjs --plan",
+    "watch": "node src/watchdog.mjs"
+  }
+}

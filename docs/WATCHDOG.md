@@ -1,0 +1,203 @@
+# Watchdog verification record
+
+What was actually run, against what, and what came back. Nothing here is
+projected or assumed; where something could not be tested it says so.
+
+Date: 2026-09-25. Node `v24.21.0`.
+
+## Test suite
+
+```
+cd watchdog && npm test
+```
+
+```
+ℹ tests 63
+ℹ suites 12
+ℹ pass 63
+ℹ fail 0
+```
+
+The suite covers the decision logic, the loop guard, secret redaction and the
+recovery steps. The OpenHands API and the sandbox are faked in the suite, because
+a test cannot wait for a real sandbox to fail a build; those paths are covered by
+the live runs below instead.
+
+## Live runs
+
+Each of these was executed against real services. The fake sandbox in the suite
+is not what these results rest on.
+
+### 1. Studio healthy - no action
+
+Against the live committed `url.json`.
+
+```
+node src/watchdog.mjs --plan
+```
+
+```
+studio address read        url=https://work-1-mhfmdgfvdofypukx.prod-runtime.all-hands.dev
+studio is alive; nothing to do
+                           detail="service=my-ai-studio version=1.0.0"
+```
+
+Exit 0. No sandbox created.
+
+### 2. Unreachable host - not conclusive
+
+`url.json` repointed at a hostname with no DNS record, served over a local
+document server so the real GitHub copy was untouched.
+
+```
+WATCHDOG_HEALTH_ATTEMPTS=3 node src/watchdog.mjs --plan
+```
+
+```
+studio did not answer conclusively; leaving it alone
+                           detail="no conclusive answer after 3 attempts
+                                   (last: unreachable: fetch failed)"
+```
+
+Exit 0. Three attempts, **no rebuild**. This is the case that must not rebuild:
+it is indistinguishable from a sleeping laptop or a DNS blip.
+
+### 3. Host up but not the studio - conclusive
+
+`url.json` repointed at a local server that answers 404 to everything.
+
+```
+node src/watchdog.mjs --plan
+```
+
+```
+studio is dead            detail="health returned HTTP 404 at .../api/health"
+plan-only: would rebuild now, but no sandbox was created
+```
+
+Exit 0, one attempt, no retry. A 404 is conclusive, so retrying would only waste
+time.
+
+### 4. Full recovery, end to end
+
+`url.json` repointed at the 404 host, then a real cycle in `--dry-run` so
+`url.json` would not be written.
+
+```
+URL_JSON_URL=<local> node src/watchdog.mjs --dry-run
+```
+
+| step | result | ms |
+|---|---|---|
+| validate credential | ok | 157 |
+| create sandbox | ok | 5648 |
+| restore repository | ok, `Cloning into 'project'...` | 1098 |
+| install dependencies and build | ok | 10168 |
+| start studio | ok | 10039 |
+| confirm studio is serving locally | ok | 38 |
+| confirm studio is reachable publicly | ok, `service=my-ai-studio version=1.0.0` | 41 |
+| publish new URL | dry-run, not written | 0 |
+
+```
+cycle finished   action=rebuilt
+                 url=https://work-1-hcklzvmtppaelqnq.prod-runtime.all-hands.dev
+                 ms=27418
+```
+
+The recovered runtime's own log, read back from the sandbox:
+
+```
+my-ai-studio backend listening   url=http://0.0.0.0:12000  env=production
+                                 database=not_configured
+                                 openrouter=not_configured
+                                 executionBackend=host
+```
+
+Note `database=not_configured` and `openrouter=not_configured`. The recovered
+runtime is genuinely degraded, and the log says so rather than implying it is
+fully configured. See the README for why no credential is copied in.
+
+After the run, `url.json` was confirmed unchanged, and the sandbox the dry run
+created (`IHBNOL94O0ceFTKxD6FT2`) was deleted; a follow-up listing showed only
+the studio's own sandbox remaining.
+
+### 5. Publishing refuses an unverified URL
+
+Run against an isolated copy of the repository, so the real `url.json` was never
+at risk.
+
+```
+node scripts/url-json-update.mjs --url https://dead-host-9f8e7d.example
+```
+
+```
+FAILED: https://dead-host-9f8e7d.example is not serving My AI Studio - fetch failed
+```
+
+Exit 1, and the copy's `url.json` was left exactly as it was. Then:
+
+```
+node scripts/url-json-update.mjs --url https://work-1-mhfmdgfvdofypukx.prod-runtime.all-hands.dev
+```
+
+```
+verified: ... (service=my-ai-studio version=1.0.0)
+url changed: https://old-host.example -> https://work-1-mhfmdgfvdofypukx...
+```
+
+Exit 0, with `previousUrl` set to the value it replaced.
+
+### 6. Loop guard
+
+With four rebuilds already recorded in the state file and a budget of four:
+
+```
+action=blocked   reason="daily rebuild budget exhausted (4/4 in 24h)"
+```
+
+No sandbox created. Covered by unit tests as well, including the minimum-gap case
+and the 24-hour window.
+
+## Bugs found by these runs, and fixed
+
+Recorded because each one produced a wrong result that the unit tests alone did
+not catch.
+
+1. **The start command never started the server.** The steps were joined with
+   spaces instead of `&&`, so `cd /workspace/project rm -f ...` became one `cd`
+   with two arguments, which fails. The launch silently did nothing and the local
+   health check read `000`. Found by live run 4.
+
+2. **`env` swallowed the separators.** With the `&&` fix, the environment
+   assignments were separate array entries, which put the separators inside the
+   `env` invocation. The env assignments are now a single joined argument.
+
+3. **The public health check inverted its own result.** The probe returns
+   `{verdict}`, but the recovery read `{ok}`. Live run 4 printed
+   `public health failed: service=my-ai-studio version=1.0.0` - a success read as
+   a failure. The recovery now accepts either shape, and both come from the same
+   code path so "alive" means one thing.
+
+4. **The log could not name the URL it checked.** The studio URL was in the
+   redaction list, because it arrives in an environment variable and looked like
+   a credential. It is public by design - it is what `url.json` publishes - and
+   redacting it made every log line useless. Removed, with a regression test.
+
+5. **The local health check sampled once.** A server that took a moment to bind
+   the port was reported as failed. It now polls for up to 30 seconds.
+
+## Not tested
+
+- **Scheduled execution.** Both workflows ship inert, with `workflow_dispatch`
+  only. The schedule block in `watchdog.yml` is commented out; enabling it lets
+  the job create sandboxes unattended, which is an operational decision. The
+  cycle itself is verified, but its behaviour on a cron has not been observed.
+
+- **A rebuild triggered by a real studio outage.** Every recovery run here used a
+  deliberately dead URL to trigger it. The studio has not actually died, so
+  recovery from a genuine outage has not been observed.
+
+- **Recovery of a runtime with `DATABASE_URL` and `OPENROUTER_API_KEY` set.** The
+  recovered runtime was verified running without them. Whether the studio works
+  fully once they are configured on a new runtime follows from the studio's own
+  tests, not from this watchdog's runs.

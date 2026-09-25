@@ -1,0 +1,126 @@
+name: watchdog
+
+# Runs the external watchdog from GitHub's infrastructure, which is the point:
+# the check and the rebuild both have to survive the runtime they supervise. A
+# job on GitHub is not running on the studio's host, so a dead studio cannot
+# prevent its own recovery.
+#
+# INERT BY DEFAULT. Only workflow_dispatch is enabled. The schedule block is
+# commented out on purpose: enabling it lets this workflow create sandboxes and
+# spend quota unattended, which is an operational decision rather than something
+# a commit should switch on. Uncomment it when you want the studio supervised
+# around the clock.
+#
+#   schedule:
+#     # Every 30 minutes. Each run is one probe plus, at most, one rebuild.
+#     - cron: '*/30 * * * *'
+#
+# This is deliberately a separate workflow from publish-url-json.yml. That one
+# publishes a URL someone supplied; this one decides whether a URL needs
+# replacing. Keeping them apart means the publishing path stays inert and the
+# recovery path can be scheduled without arming both.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'detect = check only; rebuild = recover if dead'
+        required: true
+        default: detect
+        type: choice
+        options: [detect, rebuild]
+
+# The job reads the repository and, when rebuilding, spends OpenHands quota. It
+# needs no write access to this repository: the URL is published by
+# publish-url-json.yml's script, and a rebuilt URL is reported in the job summary
+# rather than committed from here.
+permissions:
+  contents: read
+
+# One watchdog at a time. Two concurrent runs could each decide the studio is
+# dead and rebuild, which is exactly the duplication the loop guard exists to
+# prevent.
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The watchdog has no dependencies, so there is nothing to install; this
+      # only proves the suite is green before acting on a production runtime.
+      - name: Test the watchdog
+        run: npm test --prefix watchdog
+
+      # Detection always runs first, and in the same job as the rebuild, so the
+      # decision to rebuild is made against the same reading of url.json that the
+      # recovery uses. 'detect' stops here.
+      - name: Check the studio
+        id: detect
+        env:
+          OPENHANDS_API_KEY: ${{ secrets.OPENHANDS_API_KEY }}
+          WATCHDOG_STATE_PATH: ${{ runner.temp }}/watchdog-state.json
+        run: |
+          set +e
+          node watchdog/src/watchdog.mjs --plan
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" -eq 0 ]; then
+            echo "Studio is healthy or inconclusive; no action."
+          else
+            echo "Detection reported a problem (exit $code)."
+          fi
+
+      # A rebuild is only attempted when explicitly asked for AND the detection
+      # step said the studio is conclusively dead. --plan never creates a
+      # sandbox, so a detect-only run costs nothing.
+      - name: Recover when dead
+        if: ${{ inputs.mode == 'rebuild' && steps.detect.outputs.exit_code != '0' }}
+        id: recover
+        env:
+          OPENHANDS_API_KEY: ${{ secrets.OPENHANDS_API_KEY }}
+          WATCHDOG_STATE_PATH: ${{ runner.temp }}/watchdog-state.json
+          WATCHDOG_MAX_REBUILDS_PER_DAY: '4'
+        run: |
+          set +e
+          # --dry-run by default: this prints the URL it would publish without
+          # writing url.json. Replace with a real run once you are satisfied, or
+          # let publish-url-json.yml do the commit.
+          node watchdog/src/watchdog.mjs --dry-run | tee "$RUNNER_TEMP/watchdog.log"
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "## Watchdog"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| mode | ${{ inputs.mode }} |"
+            echo "| detection exit | ${{ steps.detect.outputs.exit_code }} |"
+            echo "| recovery exit | ${{ steps.recover.outputs.exit_code }} |"
+            echo ""
+            echo "Exit codes: 0 healthy, 2 rebuilt, 1 needs attention."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the recovery log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: watchdog-log
+          path: ${{ runner.temp }}/watchdog.log
+          if-no-files-found: ignore
+          retention-days: 14

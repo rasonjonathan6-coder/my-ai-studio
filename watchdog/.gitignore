@@ -1,0 +1,4 @@
+node_modules/
+# Loop-guard state is per-machine bookkeeping, not part of the source.
+state.json
+*.tmp

@@ -95,6 +95,45 @@ This serves plain HTTP on the container port and does not redirect to HTTPS,
 which the default `deploy/Caddyfile` does. The browser still sees HTTPS from the
 edge, so the session cookie stays `Secure`.
 
+### Secrets without a plaintext `.env`
+
+Nothing requires secrets to live in a `.env` file inside the checkout.
+`scripts/deploy-production.sh` reads each value from the process environment
+first and only falls back to `.env`, and `docker-compose.prod.yml` forwards the
+secrets the backend consumes (JWT, credential key, and the provider API keys)
+from the host environment into the container. The variable names are the same in
+both cases; `.env.production.example` documents them.
+
+That means a host which injects secrets into the process environment needs no
+file at all, and nothing in the checkout ever holds a secret - so `git status`
+stays clean after a deploy. A ready-made unit is in
+`deploy/my-ai-studio.service`:
+
+```bash
+sudo install -m 0644 deploy/my-ai-studio.service /etc/systemd/system/
+sudo install -d -m 0700 /etc/my-ai-studio
+sudo install -m 0600 /dev/null /etc/my-ai-studio/secrets.env
+sudo editor /etc/my-ai-studio/secrets.env   # see the header of the unit file
+sudo systemctl daemon-reload
+sudo systemctl enable --now my-ai-studio
+```
+
+Verified: with a full copy of the tree and no `.env` on disk, running
+`scripts/deploy-production.sh` with the secrets supplied only as environment
+variables reported `PRODUCTION DEPLOYMENT: PASS`, with the frontend, API health,
+database connectivity and sandboxed execution checks all passing and no `.env`
+created.
+
+If the provider offers a real secret store with an agent or API (AWS Secrets
+Manager, GCP Secret Manager, Vault), replace `EnvironmentFile=` with that
+mechanism; it only has to export the same variable names.
+
+One caveat worth knowing when testing this yourself: share `deploy-production.sh`,
+the Compose project name is fixed at `masprod`, so a second copy of the checkout
+will reuse production's Postgres volume. To rehearse a deploy side by side,
+change the project name (or the `-p masprod` in the script) and use a separate
+`DATA_ROOT` and ports.
+
 ## Option A-bis - direct Compose (development topology)
 
 Prerequisites: a Linux VM, Docker Engine, and a clone of this repository.

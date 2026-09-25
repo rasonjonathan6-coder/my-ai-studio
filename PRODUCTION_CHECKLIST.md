@@ -54,6 +54,8 @@ on that machine's toolchain.
 | Sandbox workspace mount | PASS | the project's real files are visible at `/workspace` in the sandbox and `npm install && npm test` ran there with exit 0 |
 | Production sandbox fail-closed | PASS | `resolveBackend` refuses instead of falling back to the host when the daemon is unreachable or the image is missing; 5 tests cover it, and the startup log reports `executionBackend: unavailable` in that state |
 | Production guard regression | PASS | `backend/tests/productionGuard.test.ts` - 8 tests, 8 pass |
+| Secrets outside the checkout | PASS | with a full copy of the tree and no `.env` on disk, `scripts/deploy-production.sh` run with secrets supplied only as environment variables (what `deploy/my-ai-studio.service` does via `EnvironmentFile=` outside the checkout) reported `PRODUCTION DEPLOYMENT: PASS` - frontend 200, `/api/health` 200, unauthenticated 401, `postgres` probe `AVAILABLE`, `executionBackend: docker`, served bundle free of secrets - and created no `.env` |
+| Permanent public host | NOT AVAILABLE | no host to deploy to. This machine is on a private address (`10.2.33.23`) behind the platform's reverse proxy, so it cannot serve on a public IP itself, and no provider CLI or host credential is present (`fly`/`render`/`railway`/`vercel`/`wrangler`/`doctl`/`oci`/`aws`/`gcloud`/`az`/`kubectl`/`ssh` are all absent). The Cloudflare token reaches Workers AI but cannot create a Pages project (`Authentication error`), and there are zero zones and R2 is not enabled, so it cannot host either. Deploying to a permanent host needs a host and its credentials supplied |
 
 ## Android
 

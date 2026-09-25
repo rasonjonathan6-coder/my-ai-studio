@@ -202,4 +202,134 @@ describe('checkStudioHealth', () => {
     });
     assert.equal(result.verdict, VERDICT.DEAD);
   });
+
+  // A gateway status says the request never reached a process. One is a restart;
+  // all of them is a runtime that is gone. The live case that prompted this was a
+  // 502 the studio had been answering for minutes, which the watchdog called
+  // unknown and left alone.
+  for (const status of [502, 503, 504]) {
+    it(`reports dead when every attempt returns ${status}`, async () => {
+      let calls = 0;
+      const result = await checkStudioHealth('https://studio.example', SETTINGS, {
+        sleep: noSleep,
+        fetchImpl: async () => {
+          calls += 1;
+          return jsonResponse({}, { status });
+        },
+      });
+      assert.equal(result.verdict, VERDICT.DEAD);
+      assert.equal(calls, SETTINGS.healthAttempts);
+      assert.match(result.detail, new RegExp(`HTTP ${status}`));
+    });
+  }
+
+  it('keeps a single gateway failure inconclusive', async () => {
+    // The retries are what make a gateway status conclusive, so one attempt is
+    // not enough on its own. This is the test that fails if the conclusion is
+    // drawn per attempt instead of after all of them.
+    let calls = 0;
+    const result = await checkStudioHealth('https://studio.example', SETTINGS, {
+      sleep: noSleep,
+      fetchImpl: async () => {
+        calls += 1;
+        if (calls === 1) return jsonResponse({}, { status: 502 });
+        return jsonResponse({ ok: true, service: 'my-ai-studio' });
+      },
+    });
+    assert.equal(result.verdict, VERDICT.ALIVE);
+    assert.equal(calls, 2);
+  });
+
+  it('does not conclude dead from a mixture of gateway statuses', async () => {
+    // A changing answer is noise, not evidence. Only a steady one is a verdict.
+    const statuses = [502, 503, 504];
+    let calls = 0;
+    const result = await checkStudioHealth('https://studio.example', SETTINGS, {
+      sleep: noSleep,
+      fetchImpl: async () => jsonResponse({}, { status: statuses[calls++ % statuses.length] }),
+    });
+    assert.equal(result.verdict, VERDICT.UNKNOWN);
+    assert.equal(calls, SETTINGS.healthAttempts);
+  });
+
+  it('keeps a persistent timeout unknown', async () => {
+    // A timeout is the request not arriving at all, which is indistinguishable
+    // from a sleeping laptop: never grounds to rebuild.
+    let calls = 0;
+    const result = await checkStudioHealth('https://studio.example', SETTINGS, {
+      sleep: noSleep,
+      fetchImpl: async () => {
+        calls += 1;
+        throw new Error('The operation was aborted due to timeout');
+      },
+    });
+    assert.equal(result.verdict, VERDICT.UNKNOWN);
+    assert.equal(calls, SETTINGS.healthAttempts);
+  });
+
+  it('keeps a persistent connection refusal unknown', async () => {
+    let calls = 0;
+    const result = await checkStudioHealth('https://studio.example', SETTINGS, {
+      sleep: noSleep,
+      fetchImpl: async () => {
+        calls += 1;
+        throw new Error('connect ECONNREFUSED 127.0.0.1:443');
+      },
+    });
+    assert.equal(result.verdict, VERDICT.UNKNOWN);
+    assert.equal(calls, SETTINGS.healthAttempts);
+  });
+
+  it('does not conclude dead from a 500, which the studio itself can return', async () => {
+    // A 500 means the process answered and threw. A fresh runtime would not fix
+    // that, so it must stay inconclusive however many times it is returned.
+    const result = await checkStudioHealth('https://studio.example', SETTINGS, {
+      sleep: noSleep,
+      fetchImpl: async () => jsonResponse({}, { status: 500 }),
+    });
+    assert.equal(result.verdict, VERDICT.UNKNOWN);
+  });
+
+  it('does not retry a persistent 404, which is conclusive on its own', async () => {
+    let calls = 0;
+    const result = await checkStudioHealth('https://studio.example', SETTINGS, {
+      sleep: noSleep,
+      fetchImpl: async () => {
+        calls += 1;
+        return jsonResponse({}, { status: 404 });
+      },
+    });
+    assert.equal(result.verdict, VERDICT.DEAD);
+    assert.equal(calls, 1);
+    assert.equal(result.attempts.length, 1);
+  });
+
+  it('stops retrying a gateway status as soon as the studio answers', async () => {
+    // The attempts are a grace period, not a countdown to a rebuild.
+    let calls = 0;
+    const result = await checkStudioHealth('https://studio.example', SETTINGS, {
+      sleep: noSleep,
+      fetchImpl: async () => {
+        calls += 1;
+        if (calls < 3) return jsonResponse({}, { status: 502 });
+        return jsonResponse({ ok: true, service: 'my-ai-studio' });
+      },
+    });
+    assert.equal(result.verdict, VERDICT.ALIVE);
+    assert.equal(calls, 3);
+    assert.equal(result.attempts.length, 3);
+  });
+
+  it('records the attempts it made, gateway or not', async () => {
+    const result = await checkStudioHealth('https://studio.example', SETTINGS, {
+      sleep: noSleep,
+      fetchImpl: async () => jsonResponse({}, { status: 502 }),
+    });
+    assert.equal(result.attempts.length, SETTINGS.healthAttempts);
+    assert.deepEqual(
+      result.attempts.map((a) => a.attempt),
+      [1, 2, 3],
+    );
+    assert.ok(result.attempts.every((a) => a.status === 502));
+  });
 });

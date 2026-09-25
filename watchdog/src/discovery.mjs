@@ -13,6 +13,12 @@
  * failure only becomes a verdict after several attempts spread over time, and
  * only a definite answer (a 404 from a host that is up, a wrong service name)
  * short-circuits that.
+ *
+ * One failure is different in kind, and only shows itself over time: a gateway
+ * that cannot reach the process at all. A single 502 could be a restart, so it
+ * is inconclusive on its own like any other blip. Every attempt returning one is
+ * not - it is the difference between a runtime that was replaced and one that is
+ * briefly unavailable. See GATEWAY_STATUSES.
  */
 
 import { log } from './log.mjs';
@@ -26,6 +32,37 @@ export const VERDICT = {
   DEAD: 'dead',
   UNKNOWN: 'unknown',
 };
+
+/**
+ * Statuses a gateway returns when it cannot deliver the request to the process
+ * behind it. `/api/health` answers 200 for any running studio - it holds no
+ * dependency check, and the 503 the backend does emit belongs to the separate
+ * `/api/health/ready` route - so none of these can come from the studio itself:
+ * an intermediary failed to reach it. Taken together across every attempt, that
+ * is proof the runtime is gone rather than a network blip.
+ *
+ * The read is deliberately conservative on the proxy-versus-service question.
+ * A connector that names the service in its 503 rather than its CORS 404 would
+ * be misread as dead, and recovery would create a sandbox that buys nothing; the
+ * per-day budget and rebuild gap absorb that. Treating 502 as inconclusive is
+ * not a hypothetical: the studio really was replaced and the live run really did
+ * stand still. The correction is made with that same live case as the test.
+ *
+ * 500 is absent on purpose. It means the process answered and threw, which a
+ * fresh runtime does not fix. 408 and 429 are absent for the mirror reason: both
+ * come from a service that is running.
+ */
+export const GATEWAY_STATUSES = new Set([502, 503, 504]);
+
+/**
+ * The statuses every attempt in a run returned, or null if they disagreed. A
+ * steady answer is evidence; a changing one is noise.
+ */
+function dominantStatus(attempts) {
+  if (!attempts.length) return null;
+  const statuses = [...new Set(attempts.map((a) => a.status).filter((s) => typeof s === 'number'))];
+  return statuses.length === 1 ? statuses[0] : null;
+}
 
 export class ConfigError extends Error {}
 
@@ -137,10 +174,15 @@ export async function probeOnce(baseUrl, settings, fetchImpl = fetchWithTimeout)
     const res = await fetchImpl(target, healthTimeoutMs, { 'cache-control': 'no-cache' });
     if (res.status === 404) {
       // The host answered and has no studio route: this is not a network blip.
-      return { ok: false, conclusive: true, detail: `health returned HTTP 404 at ${target}` };
+      return { ok: false, conclusive: true, status: res.status, detail: `health returned HTTP 404 at ${target}` };
+    }
+    if (GATEWAY_STATUSES.has(res.status)) {
+      // An intermediary could not reach the process behind it. Marked gateway so
+      // one attempt stays inconclusive while a run of them can conclude.
+      return { ok: false, conclusive: false, gateway: true, status: res.status, detail: `health returned HTTP ${res.status}` };
     }
     if (!res.ok) {
-      return { ok: false, conclusive: false, detail: `health returned HTTP ${res.status}` };
+      return { ok: false, conclusive: false, status: res.status, detail: `health returned HTTP ${res.status}` };
     }
     let body;
     try {
@@ -189,6 +231,20 @@ export async function checkStudioHealth(baseUrl, settings, { sleep, fetchImpl, o
       // Back off linearly; a burst of retries would not survive a restart.
       await doSleep(healthDelayMs * attempt);
     }
+  }
+
+  // Every attempt failed inconclusively on its own. A gateway status returned by
+  // every attempt is different in kind: it says the request never reached a
+  // process, and one attempt is not enough to tell a restart from a shutdown. The
+  // retries above are what make the difference, so this conclusion is only drawn
+  // after all of them.
+  const gatewayStatus = dominantStatus(attempts.filter((a) => a.gateway));
+  if (gatewayStatus !== null && attempts.every((a) => a.gateway)) {
+    return {
+      verdict: VERDICT.DEAD,
+      attempts,
+      detail: `every one of ${healthAttempts} attempts returned HTTP ${gatewayStatus}`,
+    };
   }
 
   // Every attempt failed, but none conclusively. The host may simply be having a

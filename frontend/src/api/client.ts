@@ -1,7 +1,7 @@
 import type {
   AgentRun, AiAutoProbeResponse, AiModel, AiModelTestResult, AiProviderProbeResult, AiProviderTestResult, AiProvidersResponse,
   BuildResult, CommandHistoryEntry, CommandResult, Conversation,
-  ExportResult, FileEntry, FreePlanEntry, GithubBuild, GithubCredential, CredentialProbe, GithubStatus, Message, ModelSummary, PreviewResult, Project, ProviderSelection, SecurityScan, SystemStatus, User,
+  ExportResult, FileEntry, FreePlanEntry, GithubBuild, GithubCredential, CredentialProbe, GithubStatus, Message, ModelSummary, Project, ProviderSelection, SecurityScan, SystemStatus, User,
 } from './types.ts';
 
 /** Re-exported so callers have a single import site for the contract types. */
@@ -70,7 +70,6 @@ export const api = {
   health: () => request<{ ok: boolean; service: string; version: string }>('/api/health'),
   systemStatus: () => request<SystemStatus>('/api/system/status'),
   systemInfo: () => request<SystemStatus & { config: Record<string, unknown> }>('/api/system/info'),
-  emulator: () => request<PreviewResult & { status: string; note: string }>('/api/system/emulator'),
   github: () => request<GithubStatus>('/api/system/github'),
   githubCredential: () => request<GithubCredential>('/api/system/github/credential'),
   /**
@@ -163,9 +162,8 @@ export const api = {
     request<{ build: BuildResult }>(`/api/projects/${id}/build/${buildId}`),
   builds: (id: string) => request<{ builds: Array<{ id: string; status: string; target: string; created_at: string; duration_ms: number | null }> }>(`/api/projects/${id}/builds`),
 
-  // security / preview / export
+  // security / export
   securityScan: (id: string) => request<{ scan: SecurityScan }>(`/api/projects/${id}/security/scan`, { method: 'POST' }),
-  preview: (id: string) => request<{ preview: PreviewResult }>(`/api/projects/${id}/preview`, { method: 'POST' }),
   exportProject: (id: string) => request<{ export: ExportResult }>(`/api/projects/${id}/export`, { method: 'POST' }),
   artifacts: (id: string) => request<{ artifacts: Array<{ id: string; kind: string; rel_path: string; size_bytes: number; sha256: string; created_at: string }> }>(`/api/projects/${id}/artifacts`),
 

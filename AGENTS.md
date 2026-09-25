@@ -341,8 +341,9 @@ the action and discard it, so a write is only reported as injected when the
 read-back matches. Reading other apps' text and writing into them depends on the
 target app exposing its views and accepting the write; when it does not, the app
 says which step failed instead of showing the translation as if it had been
-inserted. An emulator is not available in this environment (no KVM), so on-device
-behaviour is NOT TESTED; the build path is verified by CI.
+inserted. There is no emulator host and no KVM in this environment, so on-device
+behaviour is NOT TESTED; the Android emulator preview was removed from the
+product for that reason. The build path is verified by CI.
 
 
 ## Operational notes that cost real debugging time

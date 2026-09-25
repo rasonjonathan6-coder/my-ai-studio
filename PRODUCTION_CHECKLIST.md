@@ -45,7 +45,7 @@ on that machine's toolchain.
 | OpenRouter integration | PASS | live key configured; HTTP 200 completion; `/api/health` reports `configured`; daily-quota 429 handled honestly |
 | Multi-provider routing (OpenRouter/Gemini/Groq) | PARTIAL | `GET /api/ai/providers` and `/api/ai/providers/:id/test` run against the real provider APIs; OpenRouter reports `rate_limited · HTTP 429` while its free-model daily quota is exhausted, and Gemini/Groq report `NOT_CONFIGURED` because no server key is set. AUTO fails over only on temporary limits, never on a bad credential |
 | Provider key isolation | PASS | provider keys are read server-side only; the test endpoint masks them and no key reaches the frontend bundle or an attempt record |
-| Android preview endpoint | NOT AVAILABLE | real `adb devices` probe returns no attached device; the endpoint answers `ANDROID PREVIEW: NOT AVAILABLE` and the UI shows no mocked frame |
+| Android preview endpoint | REMOVED | the emulator/device preview over `adb` was removed from the product; `GET /api/system/emulator` and `POST /api/projects/:id/preview` return 404, pinned by `backend/tests/previewRemoval.test.ts` |
 | Agent loop (real tools) | PASS | run reached `succeeded`; source file repaired on disk and APK hash matched the inspection record |
 | Docker sandbox | PASS | commands ran in the sandbox image as uid 1000 with no socket; a live `node --version` returned the image's v18, not the host's v22 |
 | Production stack (`docker-compose.prod.yml`) | PASS | deployed and verified end to end by `scripts/deploy-production.sh`: frontend 200, `/api/health` 200, unauthenticated 401, `executionBackend: docker`, served bundle free of secrets |
@@ -68,7 +68,7 @@ on that machine's toolchain.
 | APK inspection | PASS | package/version/minSdk/targetSdk/components read from the built APK; values match `aapt2 dump badging` |
 | APK secret scan | PASS | read with the in-process ZIP reader (no system `unzip`); 178 of 422 entries scanned; clean; a key planted inside an APK was detected and masked, never echoed in full |
 | Failed build reports no artifact | PASS | broken Kotlin source → `status: failed`, `apk: null`, zero `apk produced` log lines |
-| Emulator preview | NOT AVAILABLE | no emulator, no KVM; endpoint reports `ANDROID PREVIEW: NOT AVAILABLE` |
+| Emulator preview | REMOVED | removed from the product; no emulator container, image or dependency exists in the repo |
 | CI APK workflow | PASS | `.github/workflows/android-build.yml` dispatched on a GitHub-hosted runner; job `success`, artifacts `app-debug-apk` (3 189 843 bytes) and `test-reports` |
 
 ## Operations
@@ -121,7 +121,10 @@ guess.
 - The host command backend (`SANDBOX_ENABLED=false`) runs commands as the
   service user with a denylist. It is a development fallback, not a security
   boundary. Use the sandbox in production.
-- The Android preview returns "not available" rather than a fake screen. Wiring
-  a real emulator host is future work, not a hidden gap.
+- The Android emulator preview was removed from the product rather than left
+  reporting "not available": there is no emulator host and no KVM, so the adb
+  install/launch path had nothing to run against. `POST /api/projects/:id/preview`
+  and `GET /api/system/emulator` were deleted along with the service; the Gradle
+  APK build path, APK inspection and export are unaffected.
 - There is no multi-tenant resource accounting: `MAX_CONCURRENT_JOBS` caps total
   parallelism, not per-user usage.

@@ -51,8 +51,7 @@ process that reads environment secrets.
 | `src/services/workspace.ts` | Filesystem operations confined to a project root |
 | `src/services/templates.ts` | Project templates incl. three Android apps |
 | `src/services/openrouter.ts` | OpenRouter client: timeouts, retries, error mapping |
-| `src/services/androidPreview.ts` | Real `adb devices` check; reports NOT AVAILABLE honestly |
-| `src/services/systemStatus.ts` | Probes for Node, Java, Git, Docker, SDK, Gradle, ADB, DB, disk |
+| `src/services/systemStatus.ts` | Probes for Node, Java, Git, Docker, SDK, Gradle, DB, disk |
 | `src/services/jobQueue.ts` | Bounded concurrency for build and agent jobs |
 | `src/lib/axml.ts` | Binary AndroidManifest (AXML) parser |
 

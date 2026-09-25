@@ -10,7 +10,7 @@ true:
    process produced a real APK file on disk, and the backend verified it exists
    before reporting success.
 2. **When something cannot be done, the system says so.** Missing toolchain,
-   absent API key, no emulator: each of those surfaces as
+   absent API key: each of those surfaces as
    `NOT AVAILABLE` / `NOT CONFIGURED` rather than a plausible-looking fake.
 3. **Secrets stay on the server.** The OpenRouter key, the database URL and the
    JWT secret are read from the server environment only. They are redacted from
@@ -34,7 +34,6 @@ Verified in this environment (see `FINAL_REPORT.md` for the full evidence):
 | Agent tool loop + fix/rebuild cycle | Working |
 | OpenRouter LLM calls | Code complete, `NOT CONFIGURED` (no API key here) |
 | Docker sandbox for commands | Working with `SANDBOX_ENABLED=true` (needs a Docker socket) |
-| Android emulator preview | Code complete, `NOT AVAILABLE` (no emulator here) |
 
 ## Layout
 

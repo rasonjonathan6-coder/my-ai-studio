@@ -343,19 +343,6 @@ export interface SystemStatus {
   jobs: { active: number; pending: number; max: number };
 }
 
-export interface PreviewResult {
-  available: boolean;
-  status: string;
-  devices: string[];
-  installed: boolean;
-  launched: boolean;
-  packageName: string | null;
-  logcat: string[];
-  screenshots: string[];
-  message: string;
-  steps: Array<{ step: string; ok: boolean; detail: string }>;
-}
-
 export interface ExportResult {
   ok: boolean;
   zipPath: string | null;

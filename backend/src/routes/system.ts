@@ -9,7 +9,6 @@ import { aiProviderStatus } from './ai.ts';
 import { jobQueue } from '../services/jobQueue.ts';
 import { eventBus } from '../services/eventBus.ts';
 import { checkDatabase } from '../db/pool.ts';
-import { checkEmulator } from '../services/androidPreview.ts';
 import { getGithubStatus, downloadArtifact } from '../services/githubActions.ts';
 import { requireAuth, requireAdmin } from '../middleware/auth.ts';
 import {
@@ -132,16 +131,9 @@ router.get('/system/info', asyncHandler(async (_req, res) => {
   });
 }));
 
-router.get('/system/emulator', asyncHandler(async (_req, res) => {
-  const emulator = await checkEmulator();
-  res.json({
-    ...emulator,
-    status: emulator.available ? 'AVAILABLE' : 'NOT_AVAILABLE',
-    note: emulator.available
-      ? 'An emulator/device is reachable through adb.'
-      : 'No emulator is attached. Android preview and instrumentation tests are NOT AVAILABLE in this environment.',
-  });
-}));
+// The Android emulator probe endpoint (GET /api/system/emulator) was removed
+// along with the emulator preview. The emulator/adb state is no longer part of
+// the system status; see ARCHITECTURE.md.
 
 router.get('/system/github', requireAuth, asyncHandler(async (_req, res) => {
   const status = await getGithubStatus();

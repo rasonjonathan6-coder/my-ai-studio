@@ -239,8 +239,15 @@ what the fix loop is for.
 ### `apksigner` reports `DOES NOT VERIFY` on a debug APK
 
 Normal for a debug build signed with the ephemeral debug keystore after the
-keystore was regenerated. It still installs on a device or emulator with
-`adb install`. A release build needs a real keystore.
+keystore was regenerated. It still installs on a device with `adb install`. A
+release build needs a real keystore.
+
+### The Android emulator preview is gone
+
+Intended. The adb install/launch preview was removed from the product, so
+`POST /api/projects/:id/preview` and `GET /api/system/emulator` answer 404 and the
+Preview tab is gone. Building an APK, inspecting it and exporting it are
+unaffected.
 
 ### `aapt2: command not found`
 

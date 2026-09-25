@@ -6,7 +6,7 @@ import { AiScreen, type AgentProgress } from '../screens/Ai.tsx';
 import { FileExplorer } from '../screens/Files.tsx';
 import { TerminalScreen } from '../screens/Terminal.tsx';
 import { BuildScreen } from '../screens/Build.tsx';
-import { ExportScreen, PreviewScreen } from '../screens/Export.tsx';
+import { ExportScreen } from '../screens/Export.tsx';
 import type { Project, WsEvent } from '../api/types.ts';
 
 const TABS = [
@@ -14,7 +14,6 @@ const TABS = [
   { key: 'files', label: 'Files', icon: '📁' },
   { key: 'terminal', label: 'Terminal', icon: '💻' },
   { key: 'build', label: 'Build', icon: '🔨' },
-  { key: 'preview', label: 'Preview', icon: '📱' },
   { key: 'export', label: 'Export', icon: '📦' },
 ] as const;
 
@@ -100,7 +99,6 @@ export function ProjectWorkspace({ project, onBack, onAgentState }: {
         {tab === 'files' && <FileExplorer projectId={project.id} canEdit />}
         {tab === 'terminal' && <TerminalScreen projectId={project.id} events={events} />}
         {tab === 'build' && <BuildScreen projectId={project.id} events={events} />}
-        {tab === 'preview' && <PreviewScreen projectId={project.id} />}
         {tab === 'export' && <ExportScreen projectId={project.id} />}
       </main>
     </div>

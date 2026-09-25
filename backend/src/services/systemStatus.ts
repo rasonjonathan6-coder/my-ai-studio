@@ -217,7 +217,7 @@ export async function getSystemStatus(): Promise<SystemStatus> {
     ? (name: string, cmd: string, args: string[]) => sandboxToolProbe(name, cmd, args)
     : (name: string, cmd: string, args: string[]) => toolProbe(name, cmd, args);
 
-  const [node, java, git, docker, gradle, adb, python] = await Promise.all([
+  const [node, java, git, docker, gradle, python] = await Promise.all([
     toolProbe('node', 'node', ['--version']),
     inSandbox
       ? sandboxJavaProbe()
@@ -227,7 +227,6 @@ export async function getSystemStatus(): Promise<SystemStatus> {
     toolProbe('git', 'git', ['--version']),
     toolProbe('docker', 'docker', ['--version']),
     probeTool('gradle', 'gradle', ['--version']),
-    probeTool('adb', 'adb', ['version']),
     probeTool('python', 'python3', ['--version']),
   ]);
 
@@ -279,21 +278,10 @@ export async function getSystemStatus(): Promise<SystemStatus> {
       detail: st?.lastError ? `configured; last error: ${st.lastError}` : 'configured (value hidden); no request made yet',
     };
   });
-  // An emulator needs a device actually attached, not just the adb binary.
-  // The check runs where commands execute, so sandbox adb is consulted when the
-  // docker backend is active.
-  let emulatorProbe: Probe = { name: 'androidEmulator', state: 'NOT_AVAILABLE', version: null, detail: 'adb not available' };
-  if (adb.state === 'AVAILABLE') {
-    const devices = inSandbox
-      ? await runSandboxCommand('adb devices', 20000)
-      : await probe('adb', ['devices'], 15000);
-    const attached = devices.ok
-      ? devices.output.split('\n').slice(1).filter((l) => /\t(device|emulator)/.test(l))
-      : [];
-    emulatorProbe = attached.length > 0
-      ? { name: 'androidEmulator', state: 'AVAILABLE', version: `${attached.length} device(s)`, detail: attached.map((l) => l.split('\t')[0]).join(',') }
-      : { name: 'androidEmulator', state: 'NOT_AVAILABLE', version: null, detail: 'adb present but no emulator/device attached' };
-  }
+  // An emulator probe used to run here (adb devices + an androidEmulator
+  // entry). The emulator preview was removed, so there is no emulator to report
+  // and no need to shell out to adb on every status call. adb still works in the
+  // sandbox and is part of the Android SDK toolchain used to build APKs.
 
   const total = os.totalmem();
   const free = os.freemem();
@@ -308,8 +296,8 @@ export async function getSystemStatus(): Promise<SystemStatus> {
     memory: { totalBytes: total, freeBytes: free, usedPercent: Math.round(((total - free) / total) * 100) },
     disk,
     probes: [
-      node, java, git, dockerProbe, gradle, adb, androidSdk, python,
-      dbProbe, ...providerProbes, emulatorProbe,
+      node, java, git, dockerProbe, gradle, androidSdk, python,
+      dbProbe, ...providerProbes,
     ],
     ai: {
       defaultProvider: config.aiDefaultProvider,

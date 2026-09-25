@@ -1,75 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, downloadUrl } from '../api/client.ts';
 import { Card, Empty, StatePill, bytes } from '../components/ui.tsx';
-import type { ExportResult, PreviewResult } from '../api/types.ts';
-
-export function PreviewScreen({ projectId }: { projectId: string }) {
-  const [preview, setPreview] = useState<PreviewResult | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const run = useCallback(async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await api.preview(projectId);
-      setPreview(res.preview);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }, [projectId]);
-
-  useEffect(() => { void run(); }, [run]);
-
-  return (
-    <div className="wrap">
-      <div className="page-head">
-        <h1>Preview</h1>
-        <p>Android preview requires a real emulator reachable through adb.</p>
-      </div>
-
-      <Card
-        title="Android preview"
-        actions={<button className="btn btn-ghost btn-sm" onClick={() => void run()} disabled={busy}>{busy ? 'Checking.' : 'Re-check'}</button>}
-      >
-        {!preview && <Empty>Checking for an attached device.</Empty>}
-        {preview && (
-          <>
-            <div className="row">
-              <StatePill value={preview.available ? 'AVAILABLE' : 'NOT_AVAILABLE'} />
-              <span className="hint">{preview.message}</span>
-            </div>
-            <div className="kv"><span>adb devices</span><span>{preview.devices.length > 0 ? preview.devices.join(', ') : '(none)'}</span></div>
-            <div className="kv"><span>package</span><span>{preview.packageName ?? '(unknown)'}</span></div>
-            <div className="kv"><span>installed</span><span>{String(preview.installed)}</span></div>
-            <div className="kv"><span>launched</span><span>{String(preview.launched)}</span></div>
-            {preview.steps.map((s) => (
-              <div className="kv" key={s.step}>
-                <span>{s.ok ? '✓' : '✗'} {s.step}</span>
-                <span>{s.detail}</span>
-              </div>
-            ))}
-            {preview.logcat.length > 0 && (
-              <details style={{ marginTop: 10 }}>
-                <summary className="hint">Device logs</summary>
-                <pre className="term" style={{ maxHeight: '30vh', marginTop: 8 }}>{preview.logcat.join('\n')}</pre>
-              </details>
-            )}
-            {!preview.available && (
-              <p className="hint" style={{ marginTop: 10 }}>
-                No image, screenshot or mocked frame is shown when no emulator exists. Attach a real device or an
-                emulator host and this screen will install and launch the APK.
-              </p>
-            )}
-          </>
-        )}
-        {error && <p className="error-text" role="alert">{error}</p>}
-      </Card>
-    </div>
-  );
-}
+import type { ExportResult } from '../api/types.ts';
 
 export function ExportScreen({ projectId }: { projectId: string }) {
   const [result, setResult] = useState<ExportResult | null>(null);

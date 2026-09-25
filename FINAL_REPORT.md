@@ -1576,3 +1576,60 @@ Open the host's ports 80 and 443, point DNS at it, and
 `scripts/deploy-production.sh` verifies the stack itself - it fails loudly rather
 than reporting PASS if the frontend, API, database or sandbox does not come up.
 
+---
+
+## Addendum - 2026-09-25: Android emulator preview removed
+
+The emulator/virtual-device preview was removed from the product to simplify the
+production architecture. Earlier sections of this report describe it as
+`NOT AVAILABLE`; that surface no longer exists.
+
+### What was removed
+
+- `backend/src/services/androidPreview.ts` - the whole service: `checkEmulator`
+  and `previewApk`, i.e. the `adb devices` / `adb install -r` / launch / `logcat`
+  / `screencap` path.
+- `POST /api/projects/:id/preview` (routes/projects.ts).
+- `GET /api/system/emulator` (routes/system.ts).
+- The `adb` and `androidEmulator` entries in `GET /api/system/status` probes.
+- `PreviewScreen`, the `Preview` workspace tab, `api.preview`, `api.emulator`,
+  the `PreviewResult` type and the Settings "Android preview" row.
+- `frontend/src/screens/Export.test.tsx` - it asserted only the preview screen.
+
+No emulator container, emulator image, AVD or emulator-specific npm dependency
+existed in the repository, so nothing of that kind was removed; the feature was
+entirely the adb code above.
+
+### What was kept
+
+Code editor, AI agent and its tool loop, terminal/sandbox execution, project
+creation and file editing, the Gradle/JDK/Android SDK toolchain, real APK builds,
+APK inspection, the APK secret scan, GitHub sync and GitHub Actions builds, APK
+artifact generation and download, export (APK/ZIP/logs), authentication and all
+security controls, and the Docker sandbox. `sandbox/Dockerfile`,
+`docker-compose*.yml` and every file under `.github/workflows/` are unchanged -
+`sdkmanager` and `platform-tools` in the workflows build APKs, they are not an
+emulator.
+
+### Verification
+
+- Backend: 204 tests pass (201 pre-existing + 3 new). The new
+  `backend/tests/previewRemoval.test.ts` boots the real Express app on a socket
+  and asserts `/api/system/emulator` is 404, `/api/projects/:id/preview` never
+  answers 200, and `/api/system/status` reports no emulator while still reporting
+  `java`, `gradle` and `androidSdk`. Mutation-checked: reintroducing the endpoint
+  turns it red.
+- Frontend: 30 tests pass (31 before; the preview-only test was removed).
+- Lint, typecheck and production build pass for both workspaces.
+- Secret scan of the working tree and of the served bundle: clean.
+- Remaining emulator word matches in the tree are historical report text and the
+  three `translatorTemplateFiles.ts` hits, which are a `TranslatorCore.preview()`
+  function and a `10.0.2.2` comment in the sample app - unrelated to a device.
+
+### APK build
+
+The build path never touched the emulator code. `.github/workflows/build-apk.yml`,
+`android-build.yml` and `security.yml` are byte-identical to the previous commit;
+the real APK build result for this change is in the workflow run for the commit
+below.
+

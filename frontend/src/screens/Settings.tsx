@@ -16,13 +16,11 @@ interface SystemInfo extends SystemStatus {
 export function SettingsScreen({ user, onLogout }: { user: User; onLogout: () => Promise<void> }) {
   const [info, setInfo] = useState<SystemInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [emulator, setEmulator] = useState<{ status: string; note: string; available: boolean } | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [s, e] = await Promise.all([api.systemInfo(), api.emulator()]);
+      const s = await api.systemInfo();
       setInfo(s as unknown as SystemInfo);
-      setEmulator(e);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -58,11 +56,6 @@ export function SettingsScreen({ user, onLogout }: { user: User; onLogout: () =>
                   <span className="probe-detail">{p.version || p.detail || ''}</span>
                 </div>
               ))}
-              <div className="probe-row">
-                <span className="probe-name">Android preview</span>
-                <StatePill value={emulator?.available ? 'AVAILABLE' : 'NOT_AVAILABLE'} />
-                <span className="probe-detail">{emulator?.note ?? ''}</span>
-              </div>
             </>
           )}
         </Card>

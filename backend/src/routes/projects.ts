@@ -20,7 +20,6 @@ import {
 } from '../services/githubBuilds.ts';
 import { fetchRunLogs, credentialKind } from '../services/githubActions.ts';
 import { syncWorkspaceToRepo, type SyncResult } from '../services/githubSync.ts';
-import { previewApk } from '../services/androidPreview.ts';
 import { inspectApk } from '../services/apkInspect.ts';
 import { enqueueAgentRun } from '../agent/loop.ts';
 import { aiRouter, isProviderId, isProviderSelection } from '../services/aiProvider.ts';
@@ -444,17 +443,9 @@ router.get('/:id/security/scans', asyncHandler(async (req, res) => {
 
 // ------------------------------- preview -------------------------------------
 
-router.post('/:id/preview', asyncHandler(async (req, res) => {
-  const project = await loadOwnedProject(req);
-  const apk = await latestApk(project!.id);
-  let packageName: string | null = null;
-  if (apk) {
-    const inspection = await inspectApk(apk.path);
-    packageName = inspection.packageName;
-  }
-  const result = await previewApk({ apkPath: apk?.path ?? null, packageName });
-  res.json({ preview: result });
-}));
+// The Android preview endpoint (an emulator/device install + launch over adb)
+// was removed; this deployment has no emulator host. Builds, APK inspection and
+// export are unaffected. See ARCHITECTURE.md.
 
 // -------------------------------- export -------------------------------------
 
